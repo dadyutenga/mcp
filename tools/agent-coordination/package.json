@@ -1,0 +1,23 @@
+{
+  "name": "local-agent-coordination",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/integration.test.js test/file-mcp.test.js",
+    "test:concurrency": "node --test test/concurrency.test.js",
+    "db:check": "node src/cli.js check",
+    "db:reset": "node src/cli.js reset",
+    "setup": "node src/setup.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "better-sqlite3": "13.0.3",
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "defaultOwnership": "shared",
+  "leaseSeconds": 900,
+  "maxLeaseSeconds": 3600,
+  "approvalSeconds": 3600,
+  "rules": [
+    { "pattern": "backend/**", "owner": "cursor-backend" },
+    { "pattern": "frontend/**", "owner": "antigravity-frontend" },
+    { "pattern": "shared/**", "owner": "shared" },
+    { "pattern": "*.json", "owner": "shared" },
+    { "pattern": "AGENTS.md", "owner": "shared" },
+    { "pattern": "tools/agent-coordination/**", "owner": "shared" }
+  ]
+}

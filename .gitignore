@@ -1,0 +1,4 @@
+/.local/agent-coordination/
+/tools/agent-coordination/node_modules/
+/.cursor/mcp.json
+/.agents/mcp_config.json
