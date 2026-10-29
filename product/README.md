@@ -163,10 +163,27 @@ retention as full semantic migration of every legacy workflow.
 This is **not a completed release against every scenario in the supplied full
 product specification**. Remaining release work includes richer typed resource
 schemas and per-field SQL constraints, a full migration mapping/reconciliation UI,
-explicit notification read state, comprehensive idempotency-payload conflict checks,
-SSE resync/retention tests, security hardening/failure-audit coverage, and a full
+additional security hardening and a full
 browser acceptance test that performs every agent/approval action through the
 Compose stack. The existing browser test covers a real but narrower workflow; API
 restart persistence was tested, not a complete every-screen Compose restart flow.
 No runtime adapter or automatic worktree creation is claimed. The product is local
 only; do not use these passing tests as a public-deployment security review.
+
+## Continuation verification
+
+Schema migrations 3 and 4 add durable per-owner notification read receipts, retry
+payload/authorization fingerprints, task state/progress/priority checks, and typed
+foreign keys for task assignments, dependency edges, leases and cross-repo answers.
+Idempotency keys are scoped by actor and action. Reusing a key with different data
+or changed grants returns 409; legacy cache entries without fingerprints require
+a new key. Token issuance remains deliberately non-replayable.
+
+Activity cards can now be marked read; receipts survive restart independently of
+immutable audit records. Denied domain writes emit a sanitized authorization audit
+event after the failed transaction rolls back. The integration suite verifies read
+receipts/CSRF, exact retry behavior, revocation of cached authorization, SSE replay
+from Last-Event-ID and cursor-ahead errors, and direct SQL state validation. SSE
+disconnects during initial delivery no longer leave an interval running. Audit
+history currently has no retention/deletion policy; a cursor ahead of the current
+database requires an explicit resync from zero.

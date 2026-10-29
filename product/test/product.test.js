@@ -14,6 +14,19 @@ test('real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
  const owner={id:(await http('auth/me')).data.id,owner:true};
  const exec=async(a,x)=>{const r=await http('actions/'+a,x);assert.equal(r.status,200,JSON.stringify(r.data));return r.data;};
  const project=await exec('project_create',{name:'Ride hailing'});
+ assert.equal((await http('audit?after=999999999')).status,409);
+ const retryHeaders={'idempotency-key':'project-retry-1'};
+ const retry1=await http('actions/project_create',{name:'Retry test',description:'Same request'},'POST',retryHeaders);
+ const retry2=await http('actions/project_create',{description:'Same request',name:'Retry test'},'POST',retryHeaders);
+ assert.equal(retry1.data.id,retry2.data.id);
+ assert.equal((await http('actions/project_create',{name:'Different request'},'POST',retryHeaders)).status,409);
+ const notes=await http('notifications');const note=notes.data[0];assert.equal(note.read_at,null);
+ assert.equal((await http('notifications/'+note.id+'/read',{})).status,200);
+ assert.equal((await http('notifications/'+note.id+'/read',{})).status,200);
+ assert.ok((await http('notifications')).data.find(n=>n.id===note.id).read_at);
+ assert.equal((await http('notifications/'+note.id+'/read',{},'POST',{'x-csrf-token':'wrong'})).status,403);
+ const controller=new AbortController();const stream=await fetch(base()+'/api/v1/events',{headers:{cookie},signal:controller.signal});assert.equal(stream.status,200);const frame=new TextDecoder().decode((await stream.body.getReader().read()).value);const firstId=Number(frame.match(/id: (\d+)/)[1]);controller.abort();
+ const reconnectController=new AbortController();const reconnect=await fetch(base()+'/api/v1/events',{headers:{cookie,'last-event-id':String(firstId)},signal:reconnectController.signal});const resumed=new TextDecoder().decode((await reconnect.body.getReader().read()).value);assert.ok(Number(resumed.match(/id: (\d+)/)[1])>firstId);reconnectController.abort();
  const a=await exec('repo_create',{project_id:project.id,name:'Mobile',reference:'/sample/mobile'}),b=await exec('repo_create',{project_id:project.id,name:'Go backend',reference:'/sample/backend'});
  const enroll=async(repo,name)=>exec('agent_enroll',{name,grants:[{repo_id:repo.id,permissions}]});const aa=await enroll(a,'Mobile agent'),bb=await enroll(b,'Backend agent'),racer=await enroll(a,'Second mobile agent');
  assert.equal((await pool.query('SELECT body->>\'hash\' AS hash FROM agent_tokens WHERE id=$1',[aa.token_id])).rows[0].hash.includes(aa.token),false);
@@ -41,7 +54,10 @@ test('real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
  await pool.query("UPDATE agent_tokens SET body=jsonb_set(body,'{expires_at}','\"2000-01-01T00:00:00Z\"') WHERE id=$1",[racer.token_id]);await assert.rejects(server.service.authenticate(racer.token),/Expired/);
  await assert.rejects(pool.query("UPDATE audit_events SET action='tampered' WHERE id=(SELECT min(id) FROM audit_events)"),/append-only/);
  await exec('token_revoke',{id:aa.token_id});await assert.rejects(server.service.authenticate(aa.token),/revoked/);
- const audit=await http('audit');assert.ok(audit.data.some(e=>e.action==='request_answer'));assert.ok(!JSON.stringify(audit.data).includes(aa.token));
+ await assert.rejects(pool.query("UPDATE tasks SET body=jsonb_set(body,'{state}','\"invalid-state\"') WHERE id=$1",[task.id]),/task_state/);
+ const cachedInput={repo_id:b.id,key:'cache-auth-scope',content:'Reviewed contract',permitted_repos:[b.id]};await server.service.execute(pb,'context_publish',cachedInput,'scope-retry');
+ await exec('grant_set',{agent_id:bb.agent.id,repo_id:b.id,permissions:[],reason:'Revoke scope for test'});await assert.rejects(server.service.execute(pb,'context_publish',cachedInput,'scope-retry'),/Authorization changed/);
+ const audit=await http('audit');assert.ok(audit.data.some(e=>e.action==='authorization_denied')); assert.ok(audit.data.some(e=>e.action==='request_answer'));assert.ok(!JSON.stringify(audit.data).includes(aa.token));
  await Promise.all(clients.map(c=>c.close()));clients.length=0;await server.close();server=await app({pool,bootstrapSecret:'test-bootstrap-secret-is-at-least-32-chars'});assert.equal((await http('auth/me')).status,200);assert.equal((await http('resources/tasks')).data.items.length,3);assert.equal((await http('resources/cross_repo_responses')).data.items.length,1);assert.equal((await http('settings')).data.runtime.available,false);
  }finally{await Promise.all(clients.map(c=>c.close()));await server.close();await pool.end();}
 });

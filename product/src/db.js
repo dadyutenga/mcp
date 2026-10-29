@@ -5,7 +5,7 @@ export async function database(url){
  await pool.query('SELECT 1');
  const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(431001)');
  await c.query(`CREATE TABLE IF NOT EXISTS schema_migrations(version integer PRIMARY KEY, applied_at timestamptz DEFAULT now());`);
- const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>2)throw Error('Unsupported newer schema');
+ const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>4)throw Error('Unsupported newer schema');
  if(!rows[0].v){
  await c.query(`CREATE TABLE users(id uuid PRIMARY KEY, username text UNIQUE NOT NULL, password_hash text NOT NULL);
  CREATE TABLE sessions(hash text PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),csrf text NOT NULL,expires_at timestamptz NOT NULL);
@@ -24,6 +24,21 @@ export async function database(url){
  CREATE TRIGGER immutable_audit BEFORE UPDATE OR DELETE ON audit_events FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
  INSERT INTO schema_migrations(version) VALUES(2)`);
  }
+ if(Number(rows[0].v)<3){await c.query(`ALTER TABLE idempotency ADD COLUMN request_hash text;ALTER TABLE idempotency ADD COLUMN authorization_hash text;
+ CREATE TABLE notification_receipts(event_id bigint NOT NULL REFERENCES audit_events(id), user_id uuid NOT NULL REFERENCES users(id),read_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(event_id,user_id));
+ INSERT INTO schema_migrations(version) VALUES(3)`);}
+ if(Number(rows[0].v)<4){await c.query(`
+ ALTER TABLE tasks ADD CONSTRAINT task_state CHECK(body->>'state' IN ('backlog','ready','in_progress','blocked','review','done','cancelled'));
+ ALTER TABLE tasks ADD CONSTRAINT task_progress CHECK((body->>'progress')::integer BETWEEN 0 AND 100);
+ ALTER TABLE tasks ADD CONSTRAINT task_priority CHECK((body->>'priority')::integer BETWEEN 1 AND 5);
+ ALTER TABLE tasks ADD COLUMN assignee_id uuid GENERATED ALWAYS AS ((body->>'assignee')::uuid) STORED REFERENCES agents(id);
+ ALTER TABLE task_dependencies ADD COLUMN task_id uuid GENERATED ALWAYS AS ((body->>'task_id')::uuid) STORED REFERENCES tasks(id);
+ ALTER TABLE task_dependencies ADD COLUMN depends_on_id uuid GENERATED ALWAYS AS ((body->>'depends_on')::uuid) STORED REFERENCES tasks(id);
+ ALTER TABLE task_dependencies ADD CONSTRAINT no_self_dependency CHECK(task_id<>depends_on_id);
+ ALTER TABLE file_reservations ADD COLUMN task_id uuid GENERATED ALWAYS AS ((body->>'task_id')::uuid) STORED REFERENCES tasks(id);
+ ALTER TABLE cross_repo_requests ADD COLUMN target_repo_id uuid GENERATED ALWAYS AS ((body->>'target_repo')::uuid) STORED REFERENCES repositories(id);
+ ALTER TABLE cross_repo_responses ADD COLUMN request_id uuid GENERATED ALWAYS AS ((body->>'request_id')::uuid) STORED REFERENCES cross_repo_requests(id);
+ INSERT INTO schema_migrations(version) VALUES(4)`);}
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');await pool.end();throw e;}finally{c.release();}
  return pool;
 }
