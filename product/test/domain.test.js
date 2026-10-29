@@ -434,3 +434,37 @@ test("identity reports only current effective repo grants", async () => {
     await f.pool.end();
   }
 });
+
+test(
+  "unsupported newer schemas fail promptly and release the migration connection",
+  { timeout: 10000 },
+  async () => {
+    const { default: pg } = await import("pg");
+    const admin = new pg.Pool({ connectionString: url });
+    const schema = "newer_" + randomUUID().replaceAll("-", "");
+    try {
+      await admin.query(
+        `CREATE SCHEMA "${schema}"; CREATE TABLE "${schema}".schema_migrations(version integer PRIMARY KEY); INSERT INTO "${schema}".schema_migrations VALUES(999)`,
+      );
+      const isolated = new URL(url);
+      isolated.searchParams.set("options", "-c search_path=" + schema);
+      await assert.rejects(
+        database(isolated.toString()),
+        /Unsupported newer schema/,
+      );
+      assert.equal(
+        Number(
+          (
+            await admin.query(
+              `SELECT version FROM "${schema}".schema_migrations`,
+            )
+          ).rows[0].version,
+        ),
+        999,
+      );
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await admin.end();
+    }
+  },
+);

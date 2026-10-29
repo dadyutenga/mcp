@@ -56,6 +56,7 @@ export async function database(url) {
     );
   }
   const c = await pool.connect();
+  let migrationError;
   try {
     await c.query("BEGIN");
     await c.query("SELECT pg_advisory_xact_lock(431001)");
@@ -150,11 +151,14 @@ export async function database(url) {
     }
     await c.query("COMMIT");
   } catch (e) {
-    await c.query("ROLLBACK");
-    await pool.end();
-    throw e;
+    migrationError = e;
+    await c.query("ROLLBACK").catch(() => {});
   } finally {
     c.release();
+  }
+  if (migrationError) {
+    await pool.end();
+    throw migrationError;
   }
   return pool;
 }
