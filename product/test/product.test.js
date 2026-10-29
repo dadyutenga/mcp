@@ -11,6 +11,12 @@ test('real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
  assert.equal((await http('auth/bootstrap',{secret:'test-bootstrap-secret-is-at-least-32-chars',username:'owner',password:'strong-password-test'})).status,201);
  const login=await http('auth/session',{username:'owner',password:'strong-password-test'});cookie=login.headers['set-cookie'].split(';')[0];csrf=login.data.csrf;assert.equal(login.status,200);
  assert.equal((await http('actions/project_create',{name:'Forbidden'},'POST',{'x-csrf-token':'wrong'})).status,403);
+ assert.equal((await server.inject({method:'GET',url:'/mcp'})).statusCode,401);
+ assert.equal((await http('auth/session',{username:'owner',password:'wrong-password'})).status,401);
+ const secondLogin=await http('auth/session',{username:'owner',password:'strong-password-test'});const secondCookie=secondLogin.headers['set-cookie'].split(';')[0];
+ const sessions=(await http('auth/sessions')).data;assert.equal(sessions.length,2);const secondSession=sessions.find(s=>!s.current);assert.ok(!JSON.stringify(sessions).includes('hash'));
+ assert.equal((await http('auth/sessions/'+secondSession.id,undefined,'DELETE')).status,200);
+ assert.equal((await http('auth/me',undefined,'GET',{cookie:secondCookie})).status,401);
  const owner={id:(await http('auth/me')).data.id,owner:true};
  const exec=async(a,x)=>{const r=await http('actions/'+a,x);assert.equal(r.status,200,JSON.stringify(r.data));return r.data;};
  const project=await exec('project_create',{name:'Ride hailing'});
