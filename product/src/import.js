@@ -109,12 +109,71 @@ export async function inspectImport(source, backupDir, sourceId) {
         "Unsupported schema elements; review source before importing",
       );
     const records = {};
+    const requiredColumns = {
+      agents: ["id", "display_name"],
+      tasks: ["id", "title", "description", "status", "progress", "priority"],
+      task_dependencies: ["task_id", "depends_on_task_id"],
+      file_reservations: ["id", "repository_path", "task_id", "expires_at"],
+      workspaces: ["workspace_id"],
+      repos: ["workspace_id", "repo_id"],
+      events: [
+        "cursor",
+        "workspace_id",
+        "repo_id",
+        "agent_id",
+        "timestamp",
+        "version",
+        "kind",
+        "data",
+      ],
+    };
+    if (
+      workspace
+        ? !["workspaces", "repos", "events"].every((t) => names.includes(t))
+        : !names.some((t) => ["agents", "tasks"].includes(t))
+    )
+      throw Error(
+        "Missing coordination tables; select a supported legacy database",
+      );
+    for (const name of names) {
+      const fields = copy
+        .prepare(`PRAGMA table_info("${name}")`)
+        .all()
+        .map((c) => c.name);
+      if (
+        (requiredColumns[name] || ["id"]).some(
+          (field) => !fields.includes(field),
+        )
+      )
+        throw Error(
+          "Unsupported schema columns in " +
+            name +
+            "; review source before importing",
+        );
+    }
     for (const name of names)
       records[name] = copy
         .prepare(`SELECT * FROM "${name}" ORDER BY rowid`)
         .all();
     rejectSecrets(records);
     const issues = [];
+    for (const task of records.tasks || [])
+      if (
+        !["open", "in_progress", "blocked", "completed", "cancelled"].includes(
+          task.status,
+        ) ||
+        !Number.isInteger(task.progress) ||
+        task.progress < 0 ||
+        task.progress > 100 ||
+        !Number.isInteger(task.priority) ||
+        task.priority < 1 ||
+        task.priority > 5
+      )
+        issues.push({
+          table: "tasks",
+          id: task.id,
+          error: "Unsupported task lifecycle or numeric values",
+        });
     for (const l of records.file_reservations || [])
       try {
         normalizePath(l.repository_path);

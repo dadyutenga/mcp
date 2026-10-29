@@ -91,11 +91,22 @@ export class Operations {
       })
       .strict()
       .parse(input);
-    const plan = await inspectImport(
-      this.source(x.source),
-      this.backupRoot,
-      x.source_id,
-    );
+    let plan;
+    try {
+      plan = await inspectImport(
+        this.source(x.source),
+        this.backupRoot,
+        x.source_id,
+      );
+    } catch (error) {
+      if (error.statusCode) throw error;
+      throw new Fault(
+        400,
+        error.code?.startsWith("SQLITE")
+          ? "Selected file is not a supported readable SQLite coordination database"
+          : error.message,
+      );
+    }
     const id = randomUUID();
     await transaction(this.pool, async (c) => {
       await put(c, "import_plans", {

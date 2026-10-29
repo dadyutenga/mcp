@@ -192,3 +192,22 @@ test("owner import operations expose backup, reviewed mapping and explicit apply
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("malformed legacy schemas are rejected after a safe backup without changing originals", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "malformed-import-")),
+    source = path.join(root, "bad.sqlite");
+  const db = new Sqlite(source);
+  db.exec("CREATE TABLE tasks(id TEXT);PRAGMA user_version=2");
+  db.close();
+  const before = readFileSync(source);
+  try {
+    await assert.rejects(
+      inspectImport(source, path.join(root, "backups"), "malformed-source"),
+      /Unsupported schema columns/,
+    );
+    assert.deepEqual(readFileSync(source), before);
+    assert.equal(discoverLegacy(root).length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
