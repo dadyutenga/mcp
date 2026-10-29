@@ -289,7 +289,14 @@ The acceptance checkpoints cover owner/project/repo setup; separate scoped MCP
 agents; task claim/progress and live UI; exact cross-repo approval/answer; negative
 authorization and forged IDs; claim/path races; completion/cancellation cleanup;
 read-only import with repeat/idempotence; API/DB restart; fresh backup restore and
-owner sign-in; revoked/expired credentials; responsive UI and redacted audit export.
+owner sign-in; unsupported newer-schema startup failure; revoked/expired credentials;
+responsive UI and redacted audit export.
+
+Release verification on 2026-10-29 passed: production TypeScript/Vite build, all
+17 product tests, all 22 legacy tests, all 14 deployed Compose acceptance
+checkpoints, production dependency audit (zero findings), and `git diff --check`.
+The fixtures exercised two independent repositories and separately scoped MCP
+clients; they did not use production repositories or credentials.
 
 ## Supported boundary and implementation map
 
