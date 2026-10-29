@@ -1,7 +1,7 @@
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
 import { transaction, get, list, put } from "./db.js";
-import { rejectSecrets } from "../../tools/agent-coordination/src/workspace.js";
+import { rejectSecrets } from "./secrets.js";
 export const hash = (s) => createHash("sha256").update(s).digest("hex");
 const canonical = (value) =>
   JSON.stringify(value, (_, v) =>

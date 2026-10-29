@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { database, transaction, get } from "./db.js";
 import { normalizePath } from "./service.js";
-import { rejectSecrets } from "../../tools/agent-coordination/src/workspace.js";
+import { rejectSecrets } from "./secrets.js";
 const digest = (value) =>
   createHash("sha256")
     .update(typeof value === "string" ? value : JSON.stringify(value))
