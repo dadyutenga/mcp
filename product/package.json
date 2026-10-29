@@ -8,7 +8,9 @@
     "build": "tsc --noEmit && vite build",
     "dev": "vite --host 127.0.0.1",
     "test": "node --test --test-concurrency=1 test/*.test.js",
-    "import": "node src/import.js"
+    "import": "node src/import.js",
+    "test:compose": "node test/compose-acceptance.js",
+    "diagnostics": "node src/operations.js diagnostics"
   },
   "dependencies": {
     "@fastify/static": "^10.1.8",
