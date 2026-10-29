@@ -27,22 +27,7 @@ export function mcp(service, principal) {
         }
       },
     );
-  tool("identity_get", z.object({}), async () => ({
-    agent_id: principal.id,
-    grants: (
-      await service.pool.query(
-        "SELECT repo_id,body FROM agent_repo_grants WHERE agent_id=$1",
-        [principal.id],
-      )
-    ).rows,
-    capabilities: {
-      start: false,
-      pause: false,
-      resume: false,
-      cancel: false,
-      advisory_reservations: true,
-    },
-  }));
+  tool("identity_get", z.object({}), () => service.identity(principal));
   tool(
     "events_poll",
     z.object({ after: z.number().int().nonnegative().default(0) }),

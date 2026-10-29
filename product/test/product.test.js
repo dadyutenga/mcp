@@ -72,6 +72,15 @@ test("real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
     cookie = login.headers["set-cookie"].split(";")[0];
     csrf = login.data.csrf;
     assert.equal(login.status, 200);
+    assert.match(login.headers["set-cookie"], /HttpOnly/);
+    assert.match(login.headers["set-cookie"], /SameSite=Strict/);
+    const storedPassword = (
+      await pool.query("SELECT password_hash FROM users WHERE username=$1", [
+        "owner",
+      ])
+    ).rows[0].password_hash;
+    assert.match(storedPassword, /^\$argon2id\$/);
+    assert.ok(!storedPassword.includes("strong-password-test"));
     assert.equal(
       (
         await http("actions/project_create", { name: "Forbidden" }, "POST", {
@@ -474,6 +483,8 @@ test("real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
       /Authorization changed/,
     );
     const audit = await http("audit");
+    assert.ok(audit.data.some((e) => e.action === "agent_auth_denied"));
+    assert.ok(audit.data.some((e) => e.action === "agent_authenticated"));
     assert.ok(audit.data.some((e) => e.action === "authorization_denied"));
     assert.ok(audit.data.some((e) => e.action === "request_answer"));
     assert.ok(!JSON.stringify(audit.data).includes(aa.token));

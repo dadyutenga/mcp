@@ -236,9 +236,10 @@ export class Service {
     ).rows[0];
     await c.query("INSERT INTO outbox_events(id) VALUES($1)", [r.id]);
   }
-  async authenticate(raw) {
-    if (!raw) fail(401, "Agent token required");
+  async authenticate(raw, requestId = null) {
     return transaction(this.pool, async (c) => {
+      if (typeof raw !== "string" || !raw || raw.length > 256)
+        fail(401, "Agent token required");
       const r = (
         await c.query("SELECT * FROM agent_tokens WHERE body->>'hash'=$1", [
           hash(raw),
@@ -250,6 +251,13 @@ export class Service {
         fail(401, "Expired or revoked token");
       const a = await get(c, "agents", t.agent_id);
       if (!a || a.revoked) fail(401, "Agent revoked");
+      if (!t.last_used)
+        await this.audit(
+          c,
+          { id: a.id, request_id: requestId },
+          "agent_authenticated",
+          t.id,
+        );
       await c.query(
         "UPDATE agent_tokens SET body=jsonb_set(body,'{last_used}',to_jsonb(now()::text)) WHERE id=$1",
         [t.id],
@@ -259,6 +267,19 @@ export class Service {
         [a.id],
       );
       return { id: a.id, token_id: t.id };
+    }).catch(async (error) => {
+      if (error.statusCode === 401)
+        await transaction(this.pool, (c) =>
+          this.audit(
+            c,
+            { id: "anonymous-agent", request_id: requestId },
+            "agent_auth_denied",
+            null,
+            null,
+            { outcome: "denied" },
+          ),
+        ).catch(() => {});
+      throw error;
     });
   }
   async read(p, kind, { after = "", limit = 50, id, full = false } = {}) {
@@ -430,6 +451,34 @@ export class Service {
         items: selected,
         has_more: rows.length > selected.length,
         next_cursor: selected.at(-1)?.id || after,
+      };
+    });
+  }
+  async identity(p) {
+    return transaction(this.pool, async (c) => {
+      await this.assertPrincipal(c, p);
+      const grants = (await list(c, "agent_repo_grants")).filter(
+        (g) =>
+          g.agent_id === p.id &&
+          (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
+      );
+      return {
+        agent_id: p.id,
+        grants: grants.map((g) => ({
+          repo_id: g.repo_id,
+          project_id: g.project_id,
+          body: {
+            permissions: g.permissions,
+            expires_at: g.expires_at || null,
+          },
+        })),
+        capabilities: {
+          start: false,
+          pause: false,
+          resume: false,
+          cancel: false,
+          advisory_reservations: true,
+        },
       };
     });
   }

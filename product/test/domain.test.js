@@ -417,3 +417,20 @@ test("database setup rejects missing and placeholder configuration without expos
     /PostgreSQL password/,
   );
 });
+
+test("identity reports only current effective repo grants", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.s.identity(f.pa)).grants.length, 1);
+    await f.s.execute(f.owner, "grant_set", {
+      agent_id: f.a.agent.id,
+      repo_id: f.repo.id,
+      permissions: ["task:read"],
+      expires_at: "2000-01-01T00:00:00Z",
+      reason: "Expired scope fixture",
+    });
+    assert.deepEqual((await f.s.identity(f.pa)).grants, []);
+  } finally {
+    await f.pool.end();
+  }
+});

@@ -347,8 +347,10 @@ export async function app({
     if (!reply.raw.destroyed) timer = setInterval(tick, 1500);
   });
   server.get("/mcp", async (req, reply) => {
+    rate(req);
     await service.authenticate(
       req.headers.authorization?.replace(/^Bearer /, ""),
+      req.id,
     );
     reply.code(405);
     return {
@@ -356,8 +358,10 @@ export async function app({
     };
   });
   server.delete("/mcp", async (req, reply) => {
+    rate(req);
     await service.authenticate(
       req.headers.authorization?.replace(/^Bearer /, ""),
+      req.id,
     );
     reply.code(405);
     return {
@@ -368,6 +372,7 @@ export async function app({
     rate(req);
     const p = await service.authenticate(
       req.headers.authorization?.replace(/^Bearer /, ""),
+      req.id,
     );
     p.request_id = req.id;
     const transport = new StreamableHTTPServerTransport({
