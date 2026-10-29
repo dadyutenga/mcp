@@ -58,6 +58,22 @@ const operations: Record<string, Record<string, string>> = {
     name: "text?",
     status: "archive",
   },
+  project_edit: {
+    id: "projects",
+    version: "number",
+    name: "text",
+    description: "textarea",
+    status: "archive",
+  },
+  repo_edit: {
+    id: "repositories",
+    version: "number",
+    name: "text",
+    reference: "text",
+    default_branch: "text",
+    case_sensitive: "boolean",
+    status: "archive",
+  },
   agent_enroll: {
     name: "text",
     existing_id: "agents?",
@@ -168,6 +184,7 @@ function App() {
     [preview, setPreview] = useState<Row | null>(null),
     [importResult, setImportResult] = useState<Row | null>(null),
     [sessions, setSessions] = useState<Row[]>([]);
+  const requestKey = useRef(crypto.randomUUID());
   const refreshing = useRef(false),
     pendingRefresh = useRef(false);
   const api = useCallback(
@@ -272,11 +289,25 @@ function App() {
   async function run(action: string, input: Row) {
     return api("actions/" + action, {
       method: "POST",
+      headers: ["agent_enroll", "agent_rotate"].includes(action)
+        ? {}
+        : { "Idempotency-Key": requestKey.current },
       body: JSON.stringify(input),
     });
   }
   function openAction(name: string, values: Row = {}) {
-    setDefaults(values);
+    requestKey.current = crypto.randomUUID();
+    const fields = { ...values };
+    for (const key of ["due_at", "expires_at"])
+      if (fields[key]) {
+        const date = new Date(fields[key]);
+        fields[key] = new Date(
+          date.getTime() - date.getTimezoneOffset() * 60000,
+        )
+          .toISOString()
+          .slice(0, 16);
+      }
+    setDefaults(fields);
     setAction(name);
     setError("");
   }
@@ -330,7 +361,12 @@ function App() {
       delete f.reference_commit;
     }
     try {
-      const r = await run(action, f);
+      let operation = action;
+      if (["project_edit", "repo_edit"].includes(action)) {
+        operation = "record_update";
+        f.kind = action === "project_edit" ? "projects" : "repositories";
+      }
+      const r = await run(operation, f);
       if (r.token) setCredential(r.token);
       setAction("");
       setSelected(null);
@@ -667,6 +703,15 @@ function App() {
           <>
             <section>
               <h2>Service & runtime</h2>
+              <h3>Agent connection</h3>
+              <p>
+                MCP endpoint: <code>{window.location.origin}/mcp</code>
+              </p>
+              <p>
+                Use an individually enrolled bearer token. Tokens are shown once
+                and should be stored outside repository files. Non-local
+                connections require a TLS reverse proxy.
+              </p>
               <p>PostgreSQL · {settings.database ? "Connected" : "Checking"}</p>
               <p>{settings.runtime?.reason}</p>
               <p>
@@ -983,13 +1028,19 @@ function App() {
                 {["projects", "repositories"].includes(selected.resource) && (
                   <button
                     onClick={() =>
-                      openAction("record_update", {
-                        kind: selected.resource,
-                        id: selected.id,
-                        version: selected.version,
-                        name: selected.name,
-                        status: selected.status,
-                      })
+                      openAction(
+                        selected.resource === "projects"
+                          ? "project_edit"
+                          : "repo_edit",
+                        {
+                          ...selected,
+                          kind: selected.resource,
+                          id: selected.id,
+                          version: selected.version,
+                          name: selected.name,
+                          status: selected.status,
+                        },
+                      )
                     }
                   >
                     Edit / archive
@@ -1037,6 +1088,7 @@ function App() {
                     <button
                       onClick={() =>
                         openAction("task_update", {
+                          ...selected,
                           id: selected.id,
                           version: selected.version,
                           state: selected.state,
