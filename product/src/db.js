@@ -1,11 +1,11 @@
 import pg from 'pg';
-export const tables=['projects','repositories','agents','agent_tokens','agent_repo_grants','tasks','task_dependencies','task_events','file_reservations','shared_context_items','cross_repo_requests','cross_repo_responses','runtime_jobs','imports'];
+export const tables=['projects','repositories','agents','agent_tokens','agent_repo_grants','tasks','task_dependencies','task_events','file_reservations','shared_context_items','cross_repo_requests','cross_repo_responses','runtime_jobs','imports','messages','legacy_approvals','legacy_audit','handoffs','import_plans'];
 export async function database(url){
  const pool=new pg.Pool({connectionString:url,max:10});
  await pool.query('SELECT 1');
  const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(431001)');
  await c.query(`CREATE TABLE IF NOT EXISTS schema_migrations(version integer PRIMARY KEY, applied_at timestamptz DEFAULT now());`);
- const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>4)throw Error('Unsupported newer schema');
+ const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>5)throw Error('Unsupported newer schema');
  if(!rows[0].v){
  await c.query(`CREATE TABLE users(id uuid PRIMARY KEY, username text UNIQUE NOT NULL, password_hash text NOT NULL);
  CREATE TABLE sessions(hash text PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),csrf text NOT NULL,expires_at timestamptz NOT NULL);
@@ -39,6 +39,9 @@ export async function database(url){
  ALTER TABLE cross_repo_requests ADD COLUMN target_repo_id uuid GENERATED ALWAYS AS ((body->>'target_repo')::uuid) STORED REFERENCES repositories(id);
  ALTER TABLE cross_repo_responses ADD COLUMN request_id uuid GENERATED ALWAYS AS ((body->>'request_id')::uuid) STORED REFERENCES cross_repo_requests(id);
  INSERT INTO schema_migrations(version) VALUES(4)`);}
+ if(Number(rows[0].v)<5){
+ for(const table of ['messages','legacy_approvals','legacy_audit','handoffs','import_plans']){await c.query(`CREATE TABLE IF NOT EXISTS ${table}(id uuid PRIMARY KEY,project_id uuid REFERENCES projects(id),repo_id uuid REFERENCES repositories(id),agent_id uuid REFERENCES agents(id),body jsonb NOT NULL,version integer NOT NULL DEFAULT 1,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());CREATE INDEX IF NOT EXISTS ${table}_repo ON ${table}(repo_id)`);}
+ await c.query('INSERT INTO schema_migrations(version) VALUES(5)');}
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');await pool.end();throw e;}finally{c.release();}
  return pool;
 }
