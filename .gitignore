@@ -2,3 +2,7 @@
 /tools/agent-coordination/node_modules/
 /.cursor/mcp.json
 /.agents/mcp_config.json
+/product/node_modules/
+/product/dist/
+/product/.env
+/product/backups/

@@ -128,3 +128,15 @@ need no configuration changes.
 See [the cross-repo setup guide](tools/agent-coordination/README.md#share-context-across-different-repositories)
 for both clients' configuration, example calls, limits, security behavior, and
 copy-paste AGENTS.md / CLAUDE.md snippets for each side.
+
+## Operator web panel and authenticated central service
+
+An additive PostgreSQL-backed product now lives in [`product/`](product/README.md).
+It provides owner sign-in, projects/repos, scoped agent enrollment, tasks,
+approval-gated cross-repo requests, advisory reservations, audit history, live SSE,
+and authenticated HTTP/stdio MCP access. Existing local MCP mode is unchanged.
+
+See the [product runbook](product/README.md) for Compose startup, agent connection,
+backup/restore, legacy import, verification commands, and the explicit remaining
+release requirements. This implementation is not yet a complete release against
+all scenarios in the full product build specification.
