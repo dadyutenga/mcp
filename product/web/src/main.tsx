@@ -168,6 +168,7 @@ function App() {
     [settings, setSettings] = useState<Row>({}),
     [ops, setOps] = useState<Row>({}),
     [error, setError] = useState(""),
+    [refreshError, setRefreshError] = useState(""),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(false),
     [action, setAction] = useState(""),
@@ -247,9 +248,10 @@ function App() {
         setOps(await api("operations"));
         setSessions(await api("auth/sessions"));
         setStamp(new Date().toLocaleTimeString());
+        setRefreshError("");
       } while (pendingRefresh.current);
     } catch (e) {
-      setError(String(e));
+      setRefreshError(String(e));
     } finally {
       refreshing.current = false;
       setLoading(false);
@@ -638,12 +640,13 @@ function App() {
             Live updates are reconnecting. Last successful refresh: {stamp}.
           </p>
         )}
-        {error && (
+        {(error || refreshError) && (
           <div role="alert" className="error">
-            {error}
+            {error || refreshError}
             <button
               onClick={() => {
                 setError("");
+                setRefreshError("");
                 refresh();
               }}
             >

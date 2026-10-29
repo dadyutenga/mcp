@@ -761,6 +761,7 @@ try {
   assert.ok(JSON.parse(audit).some((e) => e.action === "agent_auth_denied"));
   assert.ok(JSON.parse(audit).some((e) => e.action === "agent_authenticated"));
   assert.ok(!audit.includes(aa.raw) && !audit.includes(bb.raw));
+  await page.waitForFunction(() => !document.querySelector('[role="alert"]'));
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({
     path: "/tmp/coordination-product-desktop.png",

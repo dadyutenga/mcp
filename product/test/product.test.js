@@ -619,6 +619,22 @@ test("browser sign-in, project creation, real resource rendering and responsive 
     await page
       .getByRole("heading", { name: "Browser verified project", exact: true })
       .waitFor();
+    // An interrupted background refresh must recover without leaving a stale alert.
+    const unavailable = "**/api/v1/resources/projects?*";
+    await page.route(unavailable, (route) => route.abort("failed"));
+    await page.reload();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Failed to fetch" })
+      .waitFor();
+    await page.unroute(unavailable);
+    await page.waitForFunction(
+      () => !document.querySelector('[role="alert"]'),
+      null,
+      {
+        timeout: 25000,
+      },
+    );
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "Tasks", exact: true }).click();
     await page.getByRole("heading", { name: "Tasks", exact: true }).waitFor();
