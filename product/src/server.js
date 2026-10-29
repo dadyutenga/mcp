@@ -9,11 +9,12 @@ import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/st
 import {database,transaction} from './db.js';
 import {Service,Fault,hash,token} from './service.js';
 import {mcp} from './mcp.js';
-export async function app({pool,bootstrapSecret,secureCookies=false}={}){
+import {Operations} from './operations.js';
+export async function app({pool,bootstrapSecret,secureCookies=false,importRoot,backupRoot}={}){
  if(!bootstrapSecret||bootstrapSecret.length<24||/placeholder|changeme|example|replace_with/i.test(bootstrapSecret))throw Error('Set a random BOOTSTRAP_SECRET of at least 24 characters');
  const server=Fastify({logger:false,bodyLimit:32768,requestTimeout:30000});const service=new Service(pool);const rates=new Map();
- server.decorate('service',service);
- server.setErrorHandler((e,req,reply)=>{const status=e.statusCode||(e.name==='ZodError'?400:500);reply.code(status).send({error:{message:status===500?'Internal service error':e.message,request_id:req.id}});});
+ server.decorate('service',service);const operations=new Operations(pool,service,{importRoot,backupRoot});
+ server.setErrorHandler((e,req,reply)=>{const status=e.statusCode||(e.name==='ZodError'||['ENOENT','SQLITE_NOTADB','SQLITE_CANTOPEN'].includes(e.code)?400:500);reply.code(status).send({error:{message:status===500?'Internal service error':e.message,request_id:req.id}});});
  server.addHook('onSend',async(req,reply)=>{reply.header('X-Content-Type-Options','nosniff').header('Referrer-Policy','no-referrer').header('Cache-Control','no-store').header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'");});
  function rate(req){const key=req.ip+':'+req.url;const max=req.url==='/mcp'?300:20;const now=Date.now();let r=rates.get(key);if(!r||r.until<now){r={count:0,until:now+60000};rates.set(key,r);}if(++r.count>max)throw new Fault(429,'Try again in one minute');if(rates.size>10000)rates.clear();}
  async function owner(req,write=false){const raw=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('coord_session='))?.slice(14);if(!raw)throw new Fault(401,'Sign in required');const s=(await pool.query('SELECT * FROM sessions WHERE hash=$1 AND expires_at>now()',[hash(raw)])).rows[0];if(!s)throw new Fault(401,'Session expired');if(write&&req.headers['x-csrf-token']!==s.csrf)throw new Fault(403,'Invalid CSRF token');return{id:s.user_id,owner:true,csrf:s.csrf,session_hash:s.hash,request_id:req.id};}
@@ -29,6 +30,11 @@ export async function app({pool,bootstrapSecret,secureCookies=false}={}){
  server.get('/api/v1/notifications',async req=>service.notifications(await owner(req),Number(req.query.after)||0));
  server.post('/api/v1/notifications/:id/read',async req=>service.markRead(await owner(req,true),Number(req.params.id)));
  server.get('/api/v1/audit',async req=>service.events(await owner(req),Number(req.query.after)||0));
+ server.get('/api/v1/operations',async req=>operations.status(await owner(req)));
+ server.get('/api/v1/imports/discover',async req=>operations.discover(await owner(req)));
+ server.post('/api/v1/imports/inspect',async req=>operations.inspect(await owner(req,true),req.body));
+ server.post('/api/v1/imports/:id/review',async req=>operations.review(await owner(req,true),req.params.id,req.body));
+ server.post('/api/v1/imports/:id/apply',async req=>operations.apply(await owner(req,true),req.params.id,req.body));
  server.get('/api/v1/settings',async req=>{await owner(req);return{runtime:{available:false,reason:'External MCP agents cannot be started, paused, cancelled or isolated by this service.'},advisory_leases:true,outbox_pending:Number((await pool.query('SELECT count(*) FROM outbox_events WHERE delivered_at IS NULL')).rows[0].count),database:'postgresql',public_remote:false};});
  server.get('/api/v1/events',async(req,reply)=>{const p=await owner(req);let cursor=Number(req.headers['last-event-id']||req.query.after)||0;await service.events(p,cursor);reply.hijack();reply.raw.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});let busy=false;const tick=async()=>{if(busy)return;busy=true;try{await owner(req);for(const e of await service.events(p,cursor)){reply.raw.write(`id: ${e.id}\ndata: ${JSON.stringify(e)}\n\n`);cursor=Number(e.id);await pool.query('UPDATE outbox_events SET delivered_at=now() WHERE id=$1 AND delivered_at IS NULL',[e.id]);}reply.raw.write(': heartbeat\n\n');}catch{reply.raw.end();}finally{busy=false;}};let timer;reply.raw.on('close',()=>clearInterval(timer));await tick();if(!reply.raw.destroyed)timer=setInterval(tick,1500);});
  server.post('/mcp',async(req,reply)=>{rate(req);const p=await service.authenticate(req.headers.authorization?.replace(/^Bearer /,''));p.request_id=req.id;const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});const instance=mcp(service,p);await instance.connect(transport);reply.hijack();reply.raw.on('close',()=>{transport.close();instance.close();});await transport.handleRequest(req.raw,reply.raw,req.body);});
