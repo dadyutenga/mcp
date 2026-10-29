@@ -24,7 +24,7 @@ test("workspace migration requires complete reviewed mappings and preserves priv
   db.prepare("INSERT INTO workspaces VALUES(?)").run(w);
   for (const repo of ["mobile", "backend"])
     db.prepare("INSERT INTO repos VALUES(?,?)").run(w, repo);
-  for (let version = 1; version <= 2; version++)
+  for (const version of [1, 50])
     db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)").run(
       version,
       w,
@@ -71,6 +71,13 @@ test("workspace migration requires complete reviewed mappings and preserves priv
     const preview = await previewImport(pool, plan, mapping);
     assert.equal(preview.issues.length, 0);
     assert.equal(preview.proposed.length, 3);
+    const bad = structuredClone(plan);
+    bad.records.events[1].version = 1;
+    assert.ok(
+      (await previewImport(pool, bad, mapping)).issues.some((i) =>
+        i.error.includes("Context key/version collision"),
+      ),
+    );
     await applyImport(pool, plan, mapping);
     assert.equal(
       (await previewImport(pool, plan, mapping)).already_imported,
@@ -79,7 +86,14 @@ test("workspace migration requires complete reviewed mappings and preserves priv
     const contexts = (await s.read(owner, "shared_context_items")).items.filter(
       (r) => r.repo_id === b.id,
     );
-    assert.deepEqual(contexts.map((r) => r.context_version).sort(), [1, 2]);
+    assert.deepEqual(contexts.map((r) => r.context_version).sort(), [1, 50]);
+    const continued = await s.execute(owner, "context_publish", {
+      repo_id: b.id,
+      key: "login",
+      content: "After migration",
+      permitted_repos: [b.id],
+    });
+    assert.equal(continued.context_version, 51);
     assert.ok(
       contexts.every(
         (c) => c.permitted_repos.length === 1 && c.permitted_repos[0] === b.id,

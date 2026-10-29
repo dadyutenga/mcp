@@ -1,5 +1,5 @@
 import pg from "pg";
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 export const tables = [
   "projects",
   "repositories",
@@ -142,6 +142,11 @@ export async function database(url) {
  CREATE TRIGGER immutable_task_events BEFORE UPDATE OR DELETE ON task_events FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
  CREATE TRIGGER immutable_context BEFORE UPDATE OR DELETE ON shared_context_items FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
  INSERT INTO schema_migrations(version) VALUES(7)`);
+    }
+    if (Number(rows[0].v) < 8) {
+      await c.query(`CREATE UNIQUE INDEX context_key_version ON shared_context_items(repo_id,(body->>'key'),((body->>'context_version')::integer));
+        ALTER TABLE shared_context_items ADD CONSTRAINT positive_context_version CHECK(body ? 'context_version' AND (body->>'context_version')::integer>=1);
+        INSERT INTO schema_migrations(version) VALUES(8)`);
     }
     await c.query("COMMIT");
   } catch (e) {

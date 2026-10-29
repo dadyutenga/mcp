@@ -1070,10 +1070,20 @@ export class Service {
         const old = (await list(c, "shared_context_items")).filter(
           (i) => i.repo_id === x.repo_id && i.key === x.key,
         );
+        const nextVersion =
+          old.reduce(
+            (max, item) => Math.max(max, Number(item.context_version) || 0),
+            0,
+          ) + 1;
+        if (nextVersion > 2147483647)
+          fail(
+            409,
+            "Context version range exhausted; publish under a new reviewed key",
+          );
         r = await save("shared_context_items", {
           ...x,
           agent_id: p.owner ? null : p.id,
-          context_version: old.length + 1,
+          context_version: nextVersion,
         });
       }
       if (!r) fail(400, "Unsupported operation");

@@ -390,7 +390,36 @@ async function buildRows(c, plan, target) {
     }
   }
   const seen = new Set();
+  const contextVersions = new Set();
   for (const row of rows) {
+    if (row.table === "shared_context_items") {
+      const version = Number(row.body.context_version);
+      const scope = JSON.stringify([row.repo.id, row.body.key, version]);
+      if (!Number.isSafeInteger(version) || version < 1 || version > 2147483647)
+        issues.push({
+          table: row.table,
+          id: row.id,
+          error: "Invalid context version",
+        });
+      if (
+        contextVersions.has(scope) ||
+        (Number.isSafeInteger(version) &&
+          version >= 1 &&
+          version <= 2147483647 &&
+          (
+            await c.query(
+              "SELECT 1 FROM shared_context_items WHERE repo_id=$1 AND body->>'key'=$2 AND (body->>'context_version')::integer=$3",
+              [row.repo.id, row.body.key, version],
+            )
+          ).rowCount)
+      )
+        issues.push({
+          table: row.table,
+          id: row.id,
+          error: "Context key/version collision in destination repo",
+        });
+      contextVersions.add(scope);
+    }
     if (
       ["tasks", "shared_context_items", "agents"].includes(row.table) &&
       Buffer.byteLength(JSON.stringify(row.body)) > 24576
