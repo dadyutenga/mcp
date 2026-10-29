@@ -18,6 +18,7 @@ test('real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
  assert.equal((await http('auth/sessions/'+secondSession.id,undefined,'DELETE')).status,200);
  assert.equal((await http('auth/me',undefined,'GET',{cookie:secondCookie})).status,401);
  const owner={id:(await http('auth/me')).data.id,owner:true};
+ await pool.query("UPDATE users SET status='disabled' WHERE id=$1",[owner.id]);try{assert.equal((await http('auth/me')).status,401);}finally{await pool.query("UPDATE users SET status='active' WHERE id=$1",[owner.id]);}
  const exec=async(a,x)=>{const r=await http('actions/'+a,x);assert.equal(r.status,200,JSON.stringify(r.data));return r.data;};
  const project=await exec('project_create',{name:'Ride hailing'});
  assert.equal((await http('audit?after=999999999')).status,409);
@@ -50,7 +51,7 @@ test('real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
  await call(cb,'request_decide',{input:{id:request.id,decision:'approved',reason:'Exact contract only'}});await call(cb,'request_answer',{input:{id:request.id,content:'{"method":"POST","path":"/login","request":{"email":"string"},"response":{"session":"redacted example"}}'}});
  assert.equal((await call(ca,'cross_repo_responses_list')).items.length,1);
  assert.equal((await ca.callTool({name:'task_update',arguments:{input:{id:task.id,version:update.version,agent_id:bb.agent.id,progress:90}}})).isError,true);
- const privateContext=await server.service.execute(pb,'context_publish',{repo_id:b.id,key:'private-api',content:'Private backend details',permitted_repos:[b.id]});assert.equal((await call(ca,'shared_context_items_list')).items.length,0);
+ const privateContext=await server.service.execute(pb,'context_publish',{repo_id:b.id,key:'private-api',content:'Private backend details',permitted_repos:[b.id]});assert.equal((await call(ca,'shared_context_items_list')).items.length,0);await assert.rejects(pool.query("UPDATE shared_context_items SET body=jsonb_set(body,'{content}','\"tampered\"') WHERE id=$1",[privateContext.id]),/append-only/);
  await assert.rejects(server.service.execute(pa,'context_publish',{repo_id:b.id,key:'forged',content:'Forged',permitted_repos:[]}),/Permission/);
  await assert.rejects(server.service.execute(pa,'context_publish',{repo_id:a.id,key:'bad',content:'API_KEY=supersecrettoken',permitted_repos:[a.id]}),/secret/);
  const race=await exec('task_create',{repo_id:a.id,title:'Claim race',description:'Exactly one winner'});const outcomes=await Promise.allSettled([server.service.execute(pa,'task_claim',{id:race.id}),server.service.execute(pc,'task_claim',{id:race.id})]);assert.equal(outcomes.filter(x=>x.status==='fulfilled').length,1);

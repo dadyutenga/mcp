@@ -1,11 +1,12 @@
 import pg from 'pg';
+export const SCHEMA_VERSION=7;
 export const tables=['projects','repositories','agents','agent_tokens','agent_repo_grants','tasks','task_dependencies','task_events','file_reservations','shared_context_items','cross_repo_requests','cross_repo_responses','runtime_jobs','imports','messages','legacy_approvals','legacy_audit','handoffs','import_plans'];
 export async function database(url){
  const pool=new pg.Pool({connectionString:url,max:10});
  await pool.query('SELECT 1');
  const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(431001)');
  await c.query(`CREATE TABLE IF NOT EXISTS schema_migrations(version integer PRIMARY KEY, applied_at timestamptz DEFAULT now());`);
- const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>6)throw Error('Unsupported newer schema');
+ const {rows}=await c.query('SELECT max(version) AS v FROM schema_migrations');if(Number(rows[0].v)>SCHEMA_VERSION)throw Error('Unsupported newer schema');
  if(!rows[0].v){
  await c.query(`CREATE TABLE users(id uuid PRIMARY KEY, username text UNIQUE NOT NULL, password_hash text NOT NULL);
  CREATE TABLE sessions(hash text PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),csrf text NOT NULL,expires_at timestamptz NOT NULL);
@@ -46,6 +47,16 @@ export async function database(url){
  ALTER TABLE sessions ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid();ALTER TABLE sessions ADD CONSTRAINT session_id_unique UNIQUE(id);
  ALTER TABLE sessions ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();ALTER TABLE sessions ADD COLUMN last_used_at timestamptz NOT NULL DEFAULT now();
  INSERT INTO schema_migrations(version) VALUES(6)`);}
+ if(Number(rows[0].v)<7){await c.query(`
+ ALTER TABLE users ADD COLUMN status text NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled'));
+ ALTER TABLE users ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();ALTER TABLE users ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
+ ALTER TABLE tasks ADD CONSTRAINT required_task_fields CHECK(body ?& ARRAY['title','state','progress','priority'] AND jsonb_typeof(body->'title')='string');
+ ALTER TABLE agent_repo_grants ADD CONSTRAINT grant_permissions CHECK(jsonb_typeof(body->'permissions')='array' AND body->'permissions' <@ '["task:read","task:claim","task:update","task:comment","reservation:acquire","reservation:release","context:read","context:publish","cross_repo:request","cross_repo:approve"]'::jsonb);
+ ALTER TABLE agent_tokens ADD CONSTRAINT hashed_token_only CHECK(body->>'hash' ~ '^[a-f0-9]{64}$' AND NOT body ? 'token');
+ ALTER TABLE shared_context_items ADD CONSTRAINT context_fields CHECK(body ?& ARRAY['key','content','permitted_repos'] AND jsonb_typeof(body->'permitted_repos')='array');
+ CREATE TRIGGER immutable_task_events BEFORE UPDATE OR DELETE ON task_events FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+ CREATE TRIGGER immutable_context BEFORE UPDATE OR DELETE ON shared_context_items FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+ INSERT INTO schema_migrations(version) VALUES(7)`);}
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');await pool.end();throw e;}finally{c.release();}
  return pool;
 }
