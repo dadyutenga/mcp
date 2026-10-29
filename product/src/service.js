@@ -388,8 +388,13 @@ export class Service {
             id: x.legacy_record.id,
             fields: Object.keys(x.legacy_record),
           };
-          delete x.legacy_record;
-          x.truncated = true;
+          if (
+            !p.owner ||
+            Buffer.byteLength(JSON.stringify(x.legacy_record)) > 16000
+          ) {
+            delete x.legacy_record;
+            x.truncated = true;
+          }
         }
         if (!p.owner && full !== true && full !== "true") {
           for (const field of ["content", "description", "message", "summary"])

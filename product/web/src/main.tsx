@@ -183,7 +183,9 @@ function App() {
     [importPlan, setImportPlan] = useState<Row | null>(null),
     [preview, setPreview] = useState<Row | null>(null),
     [importResult, setImportResult] = useState<Row | null>(null),
-    [sessions, setSessions] = useState<Row[]>([]);
+    [sessions, setSessions] = useState<Row[]>([]),
+    [historyKind, setHistoryKind] = useState("messages"),
+    [historyPage, setHistoryPage] = useState<Row | null>(null);
   const requestKey = useRef(crypto.randomUUID());
   const refreshing = useRef(false),
     pendingRefresh = useRef(false);
@@ -389,6 +391,16 @@ function App() {
       });
     } catch (e) {
       setError(String(e));
+    }
+  }
+  async function loadHistory(after = "") {
+    setBusy(true);
+    try {
+      setHistoryPage(await api("resources/" + historyKind + "?after=" + after));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
     }
   }
   const repoName = (id: string) => label("repositories", id);
@@ -643,7 +655,7 @@ function App() {
               {[
                 ["Repositories", data.repositories?.length || 0],
                 [
-                  "Agents active",
+                  "Recently seen",
                   data.agents?.filter(
                     (a) =>
                       !a.revoked &&
@@ -891,6 +903,63 @@ function App() {
                 Export events
               </button>
             </div>
+            <details className="settings-section">
+              <summary>Imported historical records</summary>
+              <p>
+                These records retain legacy history. They do not grant active
+                access or represent current authenticated decisions.
+              </p>
+              <div className="toolbar">
+                <select
+                  aria-label="Historical record type"
+                  value={historyKind}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setHistoryKind(e.target.value);
+                    setHistoryPage(null);
+                  }}
+                >
+                  {[
+                    "messages",
+                    "legacy_approvals",
+                    "legacy_audit",
+                    "handoffs",
+                  ].map((kind) => (
+                    <option key={kind} value={kind}>
+                      {human(kind)}
+                    </option>
+                  ))}
+                </select>
+                <button disabled={busy} onClick={() => loadHistory()}>
+                  Load historical records
+                </button>
+              </div>
+              {historyPage?.items.map((record: Row) => (
+                <article key={record.id}>
+                  <b>{human(record.legacy_type || "historical record")}</b>
+                  <p>
+                    {repoName(record.repo_id)} · {date(record.created_at)}
+                  </p>
+                  <button
+                    className="quiet"
+                    onClick={() => viewRecord(historyKind, record)}
+                  >
+                    Inspect historical record
+                  </button>
+                </article>
+              ))}
+              {historyPage && !historyPage.items.length && (
+                <p>No historical records in this page.</p>
+              )}
+              {historyPage?.has_more && (
+                <button
+                  disabled={busy}
+                  onClick={() => loadHistory(historyPage.next_cursor)}
+                >
+                  Next historical page
+                </button>
+              )}
+            </details>
             {audit
               .filter((a) =>
                 JSON.stringify(a).toLowerCase().includes(search.toLowerCase()),
@@ -1015,11 +1084,21 @@ function App() {
                   selected.name ||
                   selected.key ||
                   selected.scope ||
-                  selected.path}
+                  selected.path ||
+                  selected.legacy_type ||
+                  selected.id}
               </h2>
               <p>
                 {selected.description || selected.reason || selected.content}
               </p>
+              {selected.legacy_record && (
+                <>
+                  <p>
+                    Historical source record — no active permission is implied.
+                  </p>
+                  <pre>{JSON.stringify(selected.legacy_record, null, 2)}</pre>
+                </>
+              )}
               <p>
                 Repository: {repoName(selected.repo_id) || "—"} · Version{" "}
                 {selected.version}

@@ -521,7 +521,7 @@ test("SQLite backup, inspection, safe import, untrusted identities, historical l
   const old = new Sqlite(source);
   const taskId = randomUUID();
   old.exec(
-    "CREATE TABLE agents(id TEXT,display_name TEXT);CREATE TABLE tasks(id TEXT,title TEXT,description TEXT,status TEXT,progress INTEGER,priority INTEGER);CREATE TABLE file_reservations(id TEXT,repository_path TEXT,normalized_path TEXT,task_id TEXT,expires_at TEXT);PRAGMA user_version=2",
+    "CREATE TABLE agents(id TEXT,display_name TEXT);CREATE TABLE tasks(id TEXT,title TEXT,description TEXT,status TEXT,progress INTEGER,priority INTEGER);CREATE TABLE file_reservations(id TEXT,repository_path TEXT,normalized_path TEXT,task_id TEXT,expires_at TEXT);CREATE TABLE messages(id TEXT,body TEXT);PRAGMA user_version=2",
   );
   old.prepare("INSERT INTO agents VALUES(?,?)").run("old-agent", "Old agent");
   old
@@ -530,6 +530,10 @@ test("SQLite backup, inspection, safe import, untrusted identities, historical l
   old
     .prepare("INSERT INTO file_reservations VALUES(?,?,?,?,?)")
     .run(randomUUID(), "src/a.js", "src/a.js", taskId, "2099-01-01T00:00:00Z");
+  const messageId = randomUUID();
+  old
+    .prepare("INSERT INTO messages VALUES(?,?)")
+    .run(messageId, "Historical coordination note");
   old.close();
   const before = readFileSync(source);
   const pool = await database(url);
@@ -552,7 +556,11 @@ test("SQLite backup, inspection, safe import, untrusted identities, historical l
     assert.equal(plan.counts.tasks, 1);
     assert.deepEqual(readFileSync(source), before);
     const result = await applyImport(pool, plan, repo.id);
-    assert.equal(result.mapped, 3);
+    assert.equal(result.mapped, 4);
+    assert.equal(
+      (await service.resource(owner, "messages", messageId)).legacy_record.body,
+      "Historical coordination note",
+    );
     assert.equal(
       (await applyImport(pool, plan, repo.id)).already_imported,
       true,
