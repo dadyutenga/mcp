@@ -109,3 +109,22 @@ npm run db:reset -- --yes-i-understand-this-deletes-coordination-data
 ```
 
 For full details on policy matching rules, reservation lifecycles, and conflict recovery, see [`tools/agent-coordination/README.md`](tools/agent-coordination/README.md).
+
+## Share status and context between repositories
+
+Use a **workspace** to link two or more repos while keeping their local tasks and
+file reservations independent. New workspace tools share status, immutable
+versioned context, handoffs with acknowledgment/resolution, and incremental change
+cursors through `~/.config/local-agent-coordination/workspaces.sqlite` (or the same
+absolute `AGENT_COORDINATION_WORKSPACE_DB` path configured in both clients).
+
+After `agent_register`, create a workspace with `workspace_create({name:
+"ride-hailing"})`. Call `workspace_join` in each repo's MCP session with the returned
+`workspace_id` and distinct repo slugs such as `backend` and `admin-ui`. Then use
+`status_post` / `status_get`, `context_publish` / `context_get`, `handoff_send` /
+`handoff_inbox`, and `changes_since` to coordinate. Existing single-repo workflows
+need no configuration changes.
+
+See [the cross-repo setup guide](tools/agent-coordination/README.md#share-context-across-different-repositories)
+for both clients' configuration, example calls, limits, security behavior, and
+copy-paste AGENTS.md / CLAUDE.md snippets for each side.

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { Coordination } from './core.js';
 import { FileCoordination } from './files.js';
+import { registerWorkspaceTools } from './workspace-tools.js';
 
 const id = z.string().trim().min(1).max(128);
 const text = z.string().trim().min(1);
@@ -143,6 +144,8 @@ export function createServer(core = new Coordination()) {
     actor(); return files.status();
   });
 
+  const workspaces = registerWorkspaceTools(tool, actor);
+  server.server.onclose = () => workspaces.close();
   return { server, core };
 }
 
