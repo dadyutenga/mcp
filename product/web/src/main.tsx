@@ -466,7 +466,10 @@ function App() {
       setImportResult(
         await api("imports/" + importPlan!.id + "/apply", {
           method: "POST",
-          body: JSON.stringify({ confirm: true }),
+          body: JSON.stringify({
+            confirm: true,
+            review_version: preview!.review_version,
+          }),
         }),
       );
       await refresh();

@@ -142,9 +142,12 @@ export class Operations {
     if (stored.state === "applied")
       throw new Fault(409, "Import already applied");
     const preview = await previewImport(this.pool, stored.plan, target);
-    await transaction(this.pool, async (c) => {
-      await put(c, "import_plans", {
-        ...stored,
+    const reviewed = await transaction(this.pool, async (c) => {
+      const current = await get(c, "import_plans", id);
+      if (current.version !== stored.version || current.state === "applied")
+        throw new Fault(409, "Import plan changed; review the latest version");
+      const updated = await put(c, "import_plans", {
+        ...current,
         mapping: target,
         preview,
         state: "reviewed",
@@ -152,28 +155,57 @@ export class Operations {
       await this.service.audit(c, p, "import_review", id, null, {
         issues: preview.issues.length,
         mapped: preview.proposed.length,
+        version: updated.version,
       });
+      return updated;
     });
-    return preview;
+    return { ...preview, review_version: reviewed.version };
   }
   async apply(p, id, input) {
     this.owner(p);
     z.uuid().parse(id);
     const confirmation = z
-      .object({ confirm: z.literal(true) })
+      .object({
+        confirm: z.literal(true),
+        review_version: z.number().int().positive(),
+      })
       .strict()
       .parse(input);
     const stored = await get(this.pool, "import_plans", id);
     if (!stored || !stored.mapping || stored.preview?.issues.length)
       throw new Fault(409, "Review a complete mapping with no issues first");
-    const result = await applyImport(this.pool, stored.plan, stored.mapping);
-    await transaction(this.pool, async (c) => {
-      await put(c, "import_plans", { ...stored, state: "applied", result });
-      await this.service.audit(c, p, "import_apply", id, null, {
-        import_id: result.id,
-      });
+    return applyImport(this.pool, stored.plan, stored.mapping, {
+      actor: p,
+      beforeApply: async (c) => {
+        const current = await get(c, "import_plans", id);
+        const expected =
+          current.state === "applied"
+            ? current.review_version
+            : current.version;
+        if (
+          confirmation.review_version !== expected ||
+          !["reviewed", "applied"].includes(current.state)
+        )
+          throw new Fault(
+            409,
+            "Import review changed; review and confirm the latest mapping",
+          );
+      },
+      afterApply: async (c, result) => {
+        const current = await get(c, "import_plans", id);
+        if (current.state === "applied") return;
+        await put(c, "import_plans", {
+          ...current,
+          state: "applied",
+          result,
+          review_version: confirmation.review_version,
+        });
+        await this.service.audit(c, p, "import_apply", id, null, {
+          import_id: result.id,
+          review_version: confirmation.review_version,
+        });
+      },
     });
-    return result;
   }
 }
 

@@ -5,12 +5,13 @@ import {
   chmodSync,
   readdirSync,
   statSync,
+  existsSync,
 } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { database, transaction, get } from "./db.js";
-import { normalizePath } from "./service.js";
+import { normalizePath, Fault } from "./service.js";
 import { rejectSecrets } from "./secrets.js";
 const digest = (value) =>
   createHash("sha256")
@@ -582,22 +583,36 @@ export async function previewImport(pool, plan, target) {
     };
   });
 }
-export async function applyImport(pool, plan, target) {
+export async function applyImport(pool, plan, target, hooks = {}) {
   return transaction(pool, async (c) => {
+    await hooks.beforeApply?.(c);
     const mapping = mappingFor(plan, target),
       signature = digest({ fingerprint: plan.fingerprint, mapping }),
       importId = mapped(plan.source_id, "import", "record"),
       previous = await get(c, "imports", importId);
     if (previous) {
       if (previous.signature !== signature)
-        throw Error(
+        throw new Fault(
+          409,
           "Source or mapping changed since import; use a new explicit source-id after reviewing collisions",
         );
-      return { already_imported: true, id: importId, counts: previous.counts };
+      const result = {
+        already_imported: true,
+        id: importId,
+        counts: previous.counts,
+      };
+      await hooks.afterApply?.(c, result);
+      return result;
     }
+    if (!plan.backup || !existsSync(plan.backup))
+      throw new Fault(
+        409,
+        "A verified backup is required; inspect the source again",
+      );
     const { rows, issues } = await buildRows(c, plan, target);
     if (issues.length)
-      throw Error(
+      throw new Fault(
+        409,
         "Import requires review: " + JSON.stringify(issues.slice(0, 20)),
       );
     for (const row of rows)
@@ -628,12 +643,19 @@ export async function applyImport(pool, plan, target) {
     ]);
     const event = (
       await c.query(
-        "INSERT INTO audit_events(actor,action,resource_id,metadata) VALUES('operator-cli','legacy_import',$1,$2) RETURNING id",
-        [importId, { counts: plan.counts, mapped: rows.length }],
+        "INSERT INTO audit_events(actor,action,resource_id,metadata,request_id) VALUES($1,'legacy_import',$2,$3,$4) RETURNING id",
+        [
+          hooks.actor?.id || "operator-cli",
+          importId,
+          { counts: plan.counts, mapped: rows.length },
+          hooks.actor?.request_id || null,
+        ],
       )
     ).rows[0];
     await c.query("INSERT INTO outbox_events(id) VALUES($1)", [event.id]);
-    return { id: importId, mapped: rows.length, counts: plan.counts };
+    const result = { id: importId, mapped: rows.length, counts: plan.counts };
+    await hooks.afterApply?.(c, result);
+    return result;
   });
 }
 if (

@@ -155,16 +155,32 @@ test("owner import operations expose backup, reviewed mapping and explicit apply
     });
     assert.equal(plan.backup_created, true);
     await assert.rejects(
-      ops.apply(owner, plan.id, { confirm: true }),
+      ops.apply(owner, plan.id, { confirm: true, review_version: 1 }),
       /Review/,
     );
     const preview = await ops.review(owner, plan.id, { default_repo: repo.id });
     assert.equal(preview.issues.length, 0);
     await assert.rejects(ops.apply(owner, plan.id, { confirm: false }));
-    const result = await ops.apply(owner, plan.id, { confirm: true });
+    const revised = await ops.review(owner, plan.id, { default_repo: repo.id });
+    await assert.rejects(
+      ops.apply(owner, plan.id, {
+        confirm: true,
+        review_version: preview.review_version,
+      }),
+      /review changed/,
+    );
+    const result = await ops.apply(owner, plan.id, {
+      confirm: true,
+      review_version: revised.review_version,
+    });
     assert.equal(result.mapped, 1);
     assert.equal(
-      (await ops.apply(owner, plan.id, { confirm: true })).already_imported,
+      (
+        await ops.apply(owner, plan.id, {
+          confirm: true,
+          review_version: revised.review_version,
+        })
+      ).already_imported,
       true,
     );
     assert.equal((await ops.status(owner)).backup_count, 1);
