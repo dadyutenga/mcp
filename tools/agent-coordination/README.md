@@ -1,5 +1,10 @@
 # Local agent coordination MCP server
 
+Compatibility guide for existing SQLite installations. New installations use
+[one central `coordination` configuration](../../product/README.md#one-mcp-configuration).
+Do not configure this legacy server alongside it. Central setup replaces recognized
+old registrations in the selected IDE file and leaves SQLite data intact.
+
 This service lets independent Cursor and Google Antigravity agents coordinate through one local SQLite database. Each IDE starts its own Node.js MCP stdio process. Both processes resolve the same project root and database, regardless of their working directory. It also coordinates file ownership and time-limited reservations.
 
 ## Requirements and installation

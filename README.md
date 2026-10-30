@@ -37,9 +37,15 @@ npm run setup:operator --prefix product -- --config /absolute/private/admin-ui-s
 
 Use the same project name and distinct repo/agent/token paths. Setup provisions
 resources, stores credentials outside the repos, verifies MCP access, and merges
-Cursor and Antigravity configurations while preserving existing MCP entries.
+one selected IDE configuration with a single `coordination` server entry. Cursor
+is the default; choose Antigravity explicitly. Recognized old coordination aliases
+are replaced while unrelated MCP integrations are preserved.
 Already enrolled agents can run `setup:agent`. Restart the IDE MCP connection after
 setup. Neither a frontend nor manual database edits are needed.
+
+All tools below use **the same MCP server** and `/mcp` endpoint. You do not need
+a second local MCP server for shared context or file coordination. See the
+[single-configuration example](product/README.md#one-mcp-configuration).
 
 ## Coordination tools
 
@@ -68,7 +74,9 @@ instructions, API setup, import, backup/restore, validation and runtime configur
 The original trusted-local SQLite MCP server remains available at
 [`tools/agent-coordination`](tools/agent-coordination/README.md). It supports
 single-repo coordination and centrally stored workspace status/context across
-repos without requiring PostgreSQL. It is a separate compatibility mode.
+repos without requiring PostgreSQL. It is retained for existing installations,
+not a second server to configure alongside the central service. New setup uses
+only `coordination` and migrates recognized old registrations.
 
 Coding agents modifying this repository follow [AGENTS.md](AGENTS.md), including
 the file ownership/reservation protocol. Product tests require a disposable
