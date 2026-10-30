@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -146,7 +146,14 @@ test("owner import operations expose backup, reviewed mapping and explicit apply
         name: "Repo",
         reference: "fixture",
       });
-    assert.throws(() => ops.source("../outside.sqlite"));
+    const outside = mkdtempSync(path.join(os.tmpdir(), "outside-import-"));
+    try {
+      const file = path.join(outside, "outside.sqlite");
+      writeFileSync(file, "existing outside candidate");
+      assert.throws(() => ops.source(file), /Import source must remain inside/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
     await assert.rejects(ops.discover({ id: randomUUID() }), /Owner/);
     assert.equal((await ops.discover(owner)).items.length, 1);
     const plan = await ops.inspect(owner, {
@@ -223,6 +230,27 @@ test("malformed legacy schemas are rejected after a safe backup without changing
     );
     assert.deepEqual(readFileSync(source), before);
     assert.equal(discoverLegacy(root).length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("discovery skips malformed databases and continues to healthy neighbours", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "discovery-"));
+  try {
+    writeFileSync(path.join(root, "broken.sqlite"), "this is not SQLite");
+    const file = path.join(root, "valid.sqlite");
+    const db = new Sqlite(file);
+    db.pragma("user_version=2");
+    db.close();
+    assert.deepEqual(
+      discoverLegacy(root).map((x) => [x.path, x.version]),
+      [[file, 2]],
+    );
+    // Discovery has released its handles; the candidate remains writable.
+    const reopened = new Sqlite(file);
+    reopened.pragma("user_version=3");
+    reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

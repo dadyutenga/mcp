@@ -19,6 +19,7 @@ import Sqlite from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { permissions } from "../src/service.js";
+import { dockerConnection } from "../src/docker.js";
 const root = fileURLToPath(new URL("../../", import.meta.url)),
   temporary = mkdtempSync(path.join(os.tmpdir(), "coordination-release-")),
   project = "coord-e2e-" + Date.now();
@@ -28,17 +29,9 @@ const random = () => randomBytes(32).toString("hex"),
   ownerPassword = random(),
   sourceDir = path.join(temporary, "imports");
 mkdirSync(sourceDir, { mode: 0o755 });
-const childEnv = { ...process.env };
-for (const key of [
-  "DOCKER_HOST",
-  "DOCKER_CONTEXT",
-  "DOCKER_TLS",
-  "DOCKER_TLS_VERIFY",
-  "DOCKER_CERT_PATH",
-])
-  delete childEnv[key];
+const { args: dockerArgs, env: childEnv } = dockerConnection();
 const docker = (args, options = {}) =>
-  execFileSync("docker", ["--host=unix:///var/run/docker.sock", ...args], {
+  execFileSync("docker", [...dockerArgs, ...args], {
     cwd: root,
     env: childEnv,
     maxBuffer: 16 * 1024 * 1024,
@@ -685,7 +678,7 @@ try {
   assert.notEqual(futureState.ExitCode, 0);
   const futureLogs = spawnSync(
     "docker",
-    ["--host=unix:///var/run/docker.sock", "logs", project + "-future"],
+    [...dockerArgs, "logs", project + "-future"],
     { cwd: root, env: childEnv, encoding: "utf8" },
   );
   assert.equal(futureLogs.status, 0);

@@ -47,6 +47,7 @@ export function mcp(service, principal) {
       name + "_list",
       z.object({
         after: z.string().optional(),
+        repo_id: z.uuid().optional(),
         limit: z.number().int().min(1).max(50).optional(),
         full: z.boolean().default(false),
       }),

@@ -187,6 +187,10 @@ function App() {
     [sessions, setSessions] = useState<Row[]>([]),
     [historyKind, setHistoryKind] = useState("messages"),
     [historyPage, setHistoryPage] = useState<Row | null>(null);
+  const [resourcePages, setResourcePages] = useState<Record<string, Row>>({});
+  const [cursors, setCursors] = useState<Record<string, string>>({});
+  const auditCursor = useRef<number | null>(null);
+  const references = new Set(["projects", "repositories", "agents"]);
   const requestKey = useRef(crypto.randomUUID());
   const refreshing = useRef(false),
     pendingRefresh = useRef(false);
@@ -221,29 +225,34 @@ function App() {
         pendingRefresh.current = false;
         const entries = await Promise.all(
           resources.map(async (k) => {
-            let after = "";
+            let after = cursors[k] || "";
             const rows: Row[] = [];
-            for (;;) {
-              const p = await api("resources/" + k + "?after=" + after);
-              rows.push(...p.items);
-              if (!p.has_more) break;
-              if (p.next_cursor === after)
+            let result: Row;
+            do {
+              result = await api("resources/" + k + "?after=" + after);
+              rows.push(...result.items);
+              if (!references.has(k) || !result.has_more) break;
+              if (result.next_cursor === after)
                 throw Error("Resource cursor did not advance");
-              after = p.next_cursor;
-            }
-            return [k, rows] as const;
+              after = result.next_cursor;
+            } while (true);
+            return [k, rows, result] as const;
           }),
         );
-        setData(Object.fromEntries(entries));
-        const events: Row[] = [];
-        let after = 0;
-        for (;;) {
-          const next = await api("notifications?after=" + after);
-          events.push(...next);
-          if (next.length < 100) break;
-          after = Number(next.at(-1).id);
-        }
-        setAudit(events);
+        setData(Object.fromEntries(entries.map(([k, rows]) => [k, rows])));
+        setResourcePages(
+          Object.fromEntries(entries.map(([k, , result]) => [k, result])),
+        );
+        const events: Row[] = await api(
+          auditCursor.current === null
+            ? "notifications?latest=true"
+            : "notifications?after=" + auditCursor.current,
+        );
+        if (events.length) auditCursor.current = Number(events.at(-1)!.id);
+        else if (auditCursor.current === null) auditCursor.current = 0;
+        setAudit((old) => [
+          ...new Map([...old, ...events].map((e) => [e.id, e])).values(),
+        ]);
         setSettings(await api("settings"));
         setOps(await api("operations"));
         setSessions(await api("auth/sessions"));
@@ -256,7 +265,7 @@ function App() {
       refreshing.current = false;
       setLoading(false);
     }
-  }, [api]);
+  }, [api, cursors]);
   useEffect(() => {
     api("auth/setup")
       .then((x) => setSetup(x.bootstrap_required))
@@ -319,6 +328,8 @@ function App() {
     e.preventDefault();
     setBusy(true);
     setError("");
+    setAudit([]);
+    auditCursor.current = null;
     const f = Object.fromEntries(new FormData(e.currentTarget));
     try {
       if (setup) {
@@ -403,6 +414,40 @@ function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+  function pagination(kind: string) {
+    if (references.has(kind)) return null;
+    return (
+      <div className="toolbar">
+        {cursors[kind] && (
+          <button onClick={() => setCursors((old) => ({ ...old, [kind]: "" }))}>
+            First {human(kind)} page
+          </button>
+        )}
+        {resourcePages[kind]?.has_more && (
+          <button
+            onClick={() =>
+              setCursors((old) => ({
+                ...old,
+                [kind]: resourcePages[kind].next_cursor,
+              }))
+            }
+          >
+            Next {human(kind)} page
+          </button>
+        )}
+      </div>
+    );
+  }
+  async function olderAudit() {
+    try {
+      const older = await api("notifications?before=" + audit[0]?.id);
+      setAudit((old) => [
+        ...new Map([...older, ...old].map((e) => [e.id, e])).values(),
+      ]);
+    } catch (e) {
+      setError(String(e));
     }
   }
   const repoName = (id: string) => label("repositories", id);
@@ -705,6 +750,9 @@ function App() {
               </section>
               <section>
                 <h2>Recent activity</h2>
+                {audit.length > 0 && (
+                  <button onClick={olderAudit}>Load older activity</button>
+                )}
                 {audit
                   .slice(-8)
                   .reverse()
@@ -983,7 +1031,16 @@ function App() {
                             method: "POST",
                             body: "{}",
                           });
-                          await refresh();
+                          setAudit((old) =>
+                            old.map((event) =>
+                              event.id === a.id
+                                ? {
+                                    ...event,
+                                    read_at: new Date().toISOString(),
+                                  }
+                                : event,
+                            ),
+                          );
                         } catch (e) {
                           setError(String(e));
                         }
@@ -1057,6 +1114,7 @@ function App() {
             ) : (
               <div className="cards">{filtered.map(card)}</div>
             )}
+            {pagination(pages[page])}
             {!filtered.length && (
               <section className="empty">
                 <h2>
@@ -1273,6 +1331,7 @@ function App() {
                         )}
                       </article>
                     ))}
+                  {pagination("agent_repo_grants")}
                   <h3>Tokens</h3>
                   {data.agent_tokens
                     ?.filter((t) => t.agent_id === selected.id)
@@ -1294,6 +1353,7 @@ function App() {
                         </button>
                       </article>
                     ))}
+                  {pagination("agent_tokens")}
                 </>
               )}
               {selected.resource === "tasks" && (
@@ -1314,6 +1374,7 @@ function App() {
                         </button>
                       </article>
                     ))}
+                  {pagination("task_dependencies")}
                   <h3>History & comments</h3>
                   {data.task_events
                     ?.filter((e) => e.task_id === selected.id)
@@ -1324,6 +1385,7 @@ function App() {
                         <small>{date(e.created_at)}</small>
                       </article>
                     ))}
+                  {pagination("task_events")}
                   <h3>Linked requests</h3>
                   {data.cross_repo_requests
                     ?.filter((q) => q.task_id === selected.id)

@@ -64,8 +64,9 @@ export async function app({
       );
   });
   function rate(req) {
-    const key = req.ip + ":" + req.url;
-    const max = req.url === "/mcp" ? 300 : 20;
+    const route = req.routeOptions?.url || req.url.split("?", 1)[0];
+    const key = req.ip + ":" + req.method + ":" + route;
+    const max = route === "/mcp" ? 300 : 20;
     const now = Date.now();
     let r = rates.get(key);
     if (!r || r.until < now) {
@@ -267,7 +268,10 @@ export async function app({
     ),
   );
   server.get("/api/v1/notifications", async (req) =>
-    service.notifications(await owner(req), Number(req.query.after) || 0),
+    service.notifications(await owner(req), Number(req.query.after || 0), {
+      before: req.query.before,
+      latest: req.query.latest === "true",
+    }),
   );
   server.post("/api/v1/notifications/:id/read", async (req) =>
     service.markRead(await owner(req, true), Number(req.params.id)),

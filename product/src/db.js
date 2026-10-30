@@ -162,11 +162,13 @@ export async function database(url) {
   }
   return pool;
 }
-export async function transaction(pool, fn) {
+export async function transaction(pool, fn, { readOnly = false } = {}) {
   const c = await pool.connect();
   try {
-    await c.query("BEGIN");
-    await c.query("SELECT pg_advisory_xact_lock(431002)");
+    await c.query(
+      readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN",
+    );
+    if (!readOnly) await c.query("SELECT pg_advisory_xact_lock(431002)");
     const r = await fn(c);
     await c.query("COMMIT");
     return r;
