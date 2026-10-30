@@ -440,7 +440,7 @@ try {
   );
   assert.equal(task.progress, 100);
   report(
-    "Completion/cancellation release task leases and record lifecycle history; external runtime controls remain unsupported",
+    "Completion/cancellation release task leases and record lifecycle history; external IDE controls remain outside the managed runner",
   );
   const source = path.join(sourceDir, "sample.sqlite"),
     old = new Sqlite(source),
@@ -782,7 +782,7 @@ try {
         passed: true,
         checks,
         verified_at: new Date().toISOString(),
-        runtime_adapter: "unsupported",
+        runtime_adapter: "unconfigured",
         public_deployment: false,
       },
       null,

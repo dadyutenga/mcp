@@ -10,7 +10,8 @@ import {
   discoverLegacy,
 } from "./import.js";
 import { transaction, get, put } from "./db.js";
-import { Fault } from "./service.js";
+import { Fault, Service } from "./service.js";
+import { DockerRuntime, loadRuntimeConfig } from "./runtime.js";
 const mapping = z.object({
   default_repo: z.uuid().optional(),
   repositories: z.record(z.string(), z.uuid()).default({}),
@@ -226,7 +227,13 @@ export async function diagnose(pool) {
         )
       ).rows[0].count,
     ),
-    runtime_adapter: "unsupported",
+    runtime_adapter: process.env.COORDINATION_RUNTIME_CONFIG
+      ? await new DockerRuntime(
+          pool,
+          new Service(pool),
+          await loadRuntimeConfig(),
+        ).health()
+      : { available: false, reason: "Managed runtime is not configured" },
     advisory_reservations: true,
   };
 }

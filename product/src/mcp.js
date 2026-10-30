@@ -84,5 +84,23 @@ export function mcp(service, principal) {
       }),
       (x) => service.execute(principal, name, x.input, x.idempotency_key),
     );
+  if (service.runtime) {
+    tool("runtime_status", z.object({ id: z.uuid() }), (x) =>
+      service.runtime.status(principal, x.id),
+    );
+    tool("runtime_diff", z.object({ id: z.uuid() }), (x) =>
+      service.runtime.diff(principal, x.id),
+    );
+    tool(
+      "runtime_files_write",
+      z.object({
+        id: z.uuid(),
+        files: z
+          .array(z.object({ path: z.string(), content: z.string().nullable() }))
+          .max(20),
+      }),
+      (x) => service.runtime.apply(principal, x.id, x.files),
+    );
+  }
   return server;
 }

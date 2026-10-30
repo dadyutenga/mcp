@@ -1,5 +1,5 @@
 import pg from "pg";
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 export const tables = [
   "projects",
   "repositories",
@@ -148,6 +148,12 @@ export async function database(url) {
       await c.query(`CREATE UNIQUE INDEX context_key_version ON shared_context_items(repo_id,(body->>'key'),((body->>'context_version')::integer));
         ALTER TABLE shared_context_items ADD CONSTRAINT positive_context_version CHECK(body ? 'context_version' AND (body->>'context_version')::integer>=1);
         INSERT INTO schema_migrations(version) VALUES(8)`);
+    }
+    if (Number(rows[0].v) < 9) {
+      await c.query(`ALTER TABLE runtime_jobs ADD COLUMN task_id uuid GENERATED ALWAYS AS ((body->>'task_id')::uuid) STORED REFERENCES tasks(id);
+        CREATE UNIQUE INDEX active_runtime_task ON runtime_jobs(task_id) WHERE body->>'state' IN ('preparing','running','paused');
+        ALTER TABLE runtime_jobs ADD CONSTRAINT runtime_state CHECK(body->>'state' IN ('preparing','running','paused','exited','cancelled','failed'));
+        INSERT INTO schema_migrations(version) VALUES(9)`);
     }
     await c.query("COMMIT");
   } catch (e) {

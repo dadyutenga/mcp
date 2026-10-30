@@ -10,12 +10,14 @@ import { database, transaction, SCHEMA_VERSION } from "./db.js";
 import { Service, Fault, hash, token } from "./service.js";
 import { mcp } from "./mcp.js";
 import { Operations } from "./operations.js";
+import { DockerRuntime, loadRuntimeConfig } from "./runtime.js";
 export async function app({
   pool,
   bootstrapSecret,
   secureCookies = false,
   importRoot,
   backupRoot,
+  runtimeConfig,
 } = {}) {
   if (
     !bootstrapSecret ||
@@ -30,6 +32,34 @@ export async function app({
     requestTimeout: 30000,
   });
   const service = new Service(pool);
+  const runtime = new DockerRuntime(
+    pool,
+    service,
+    runtimeConfig === undefined ? await loadRuntimeConfig() : runtimeConfig,
+  );
+  service.runtime = runtime;
+  server.decorate("runtime", runtime);
+  let runtimeTimer,
+    reconciling = false;
+  if (runtime.config) {
+    const reconcile = async () => {
+      if (reconciling) return;
+      reconciling = true;
+      try {
+        await runtime.reconcile();
+      } catch {
+        // Temporary database/daemon failure must not crash the service.
+      } finally {
+        reconciling = false;
+      }
+    };
+    server.addHook("onReady", async () => {
+      await reconcile();
+      runtimeTimer = setInterval(reconcile, 2000);
+      runtimeTimer.unref();
+    });
+    server.addHook("onClose", async () => clearInterval(runtimeTimer));
+  }
   const rates = new Map();
   const dummyPassword = await passwordHash(token(), {
     memoryCost: 19456,
@@ -297,11 +327,7 @@ export async function app({
   server.get("/api/v1/settings", async (req) => {
     await owner(req);
     return {
-      runtime: {
-        available: false,
-        reason:
-          "External MCP agents cannot be started, paused, cancelled or isolated by this service.",
-      },
+      runtime: await runtime.health(),
       advisory_leases: true,
       outbox_pending: Number(
         (
@@ -313,6 +339,26 @@ export async function app({
       database: "postgresql",
       public_remote: false,
     };
+  });
+  server.post("/api/v1/runtime/start", async (req) =>
+    runtime.start(await owner(req, true), req.body),
+  );
+  server.get("/api/v1/runtime/:id", async (req) =>
+    runtime.status(await owner(req), req.params.id),
+  );
+  server.get("/api/v1/runtime/:id/diff", async (req) =>
+    runtime.diff(await owner(req), req.params.id),
+  );
+  server.get("/api/v1/runtime/:id/output", async (req) =>
+    runtime.output(await owner(req), req.params.id),
+  );
+  server.post("/api/v1/runtime/:id/:control", async (req) => {
+    const p = await owner(req, true);
+    if (req.params.control === "collect")
+      return runtime.collect(p, req.params.id);
+    if (req.params.control === "write")
+      return runtime.apply(p, req.params.id, req.body?.files);
+    return runtime.control(p, req.params.id, req.params.control);
   });
   server.get("/api/v1/events", async (req, reply) => {
     const p = await owner(req);

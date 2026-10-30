@@ -293,6 +293,7 @@ export class Service {
       id,
       repo_id,
       task_id,
+      request_id,
       agent_id,
       full = false,
     } = {},
@@ -301,6 +302,7 @@ export class Service {
     if (id) z.uuid().parse(id);
     if (repo_id) z.uuid().parse(repo_id);
     if (task_id) z.uuid().parse(task_id);
+    if (request_id) z.uuid().parse(request_id);
     if (agent_id) z.uuid().parse(agent_id);
     if (
       !Number.isInteger(Number(limit)) ||
@@ -346,6 +348,8 @@ export class Service {
         if (id) filters.push(`r.id=${bind(id)}::uuid`);
         if (repo_id) filters.push(`r.repo_id=${bind(repo_id)}::uuid`);
         if (task_id) filters.push(`r.body->>'task_id'=${bind(task_id)}`);
+        if (request_id)
+          filters.push(`r.body->>'request_id'=${bind(request_id)}`);
         if (agent_id) filters.push(`r.agent_id=${bind(agent_id)}::uuid`);
         if (!p.owner) {
           if (
@@ -502,10 +506,15 @@ export class Service {
             },
           })),
           capabilities: {
-            start: false,
-            pause: false,
-            resume: false,
-            cancel: false,
+            ...(this.runtime?.capabilities() || {
+              start: false,
+              pause: false,
+              resume: false,
+              cancel: false,
+              isolatedWorktrees: false,
+              enforcedWrites: false,
+            }),
+            external_agent_control: false,
             advisory_reservations: true,
           },
         };
