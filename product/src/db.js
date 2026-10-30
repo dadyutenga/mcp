@@ -168,8 +168,15 @@ export async function database(url) {
   }
   return pool;
 }
-export async function transaction(pool, fn, { readOnly = false } = {}) {
+export async function transaction(pool, fn, options) {
   const c = await pool.connect();
+  try {
+    return await connectionTransaction(c, fn, options);
+  } finally {
+    c.release();
+  }
+}
+export async function connectionTransaction(c, fn, { readOnly = false } = {}) {
   try {
     await c.query(
       readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN",
@@ -181,8 +188,6 @@ export async function transaction(pool, fn, { readOnly = false } = {}) {
   } catch (e) {
     await c.query("ROLLBACK");
     throw e;
-  } finally {
-    c.release();
   }
 }
 export function hydrate(r) {

@@ -15,11 +15,14 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { transaction, get, put, hydrate } from "./db.js";
+import { transaction, connectionTransaction, get, put, hydrate } from "./db.js";
 import { Fault, normalizePath } from "./service.js";
 import { rejectSecrets } from "./secrets.js";
 import { dockerConnection } from "./docker.js";
 const exec = promisify(execFile);
+// Leave pool capacity for ordinary service requests while Docker is slow.
+const dockerCapacity = new WeakMap();
+
 // Source attributes/configuration must not activate operator Git filters/hooks.
 const gitEnv = () => ({
   ...Object.fromEntries(
@@ -181,7 +184,7 @@ export class DockerRuntime {
     }
   }
   container(id) {
-    return "coordination-job-" + z.uuid().parse(id);
+    return "coordination-job-" + z.uuid().parse(id).toLowerCase();
   }
   async job(c, id) {
     const job = await get(c, "runtime_jobs", z.uuid().parse(id));
@@ -444,118 +447,222 @@ export class DockerRuntime {
       error(409, "Container identity does not match this job");
     return data.State;
   }
+  async withJobLock(id, run, busy) {
+    id = z.uuid().parse(id).toLowerCase();
+    let capacity = dockerCapacity.get(this.pool);
+    if (!capacity) {
+      capacity = {
+        used: 0,
+        max: Math.max(0, Math.min(2, (this.pool.options?.max ?? 10) - 1)),
+      };
+      dockerCapacity.set(this.pool, capacity);
+    }
+    if (capacity.used >= capacity.max) return busy();
+    capacity.used++;
+    let c,
+      locked = false,
+      discard = false;
+    try {
+      c = await this.pool.connect();
+      locked = (
+        await c.query(
+          "SELECT pg_try_advisory_lock(hashtextextended($1,431003)) AS locked",
+          [id],
+        )
+      ).rows[0].locked;
+      if (!locked) return busy();
+      // This is a session lock, not a transaction. All SQL transactions below
+      // finish before invoking Docker, and only brief persistence uses 431002.
+      return await run(c);
+    } finally {
+      if (locked) {
+        try {
+          discard = !(
+            await c.query(
+              "SELECT pg_advisory_unlock(hashtextextended($1,431003)) AS unlocked",
+              [id],
+            )
+          ).rows[0].unlocked;
+        } catch {
+          discard = true;
+        }
+      }
+      c?.release(discard);
+      capacity.used--;
+    }
+  }
+  async observedJob(c, p, id, write = false) {
+    return connectionTransaction(
+      c,
+      async (client) => {
+        const job = await this.job(client, id);
+        await this.authorize(client, p, job);
+        if (write) await this.writable(client, job);
+        return job;
+      },
+      { readOnly: true },
+    );
+  }
+  async persistObserved(c, job, changes) {
+    const result = await c.query(
+      "UPDATE runtime_jobs SET body=body || $1::jsonb,version=version+1,updated_at=now() WHERE id=$2 AND version=$3 AND body->>'state'=$4 RETURNING *",
+      [changes, job.id, job.version, job.state],
+    );
+    return hydrate(result.rows[0]);
+  }
   async status(p, id) {
-    return transaction(this.pool, async (c) => {
-      const job = await this.job(c, id);
-      await this.authorize(c, p, job);
-      if (!active.includes(job.state)) return job;
-      let state;
-      try {
-        state = await this.inspect(job);
-      } catch (e) {
+    const cached = await transaction(
+      this.pool,
+      async (c) => {
+        const job = await this.job(c, id);
+        await this.authorize(c, p, job);
+        return job;
+      },
+      { readOnly: true },
+    );
+    if (!active.includes(cached.state)) return cached;
+    return this.withJobLock(
+      id,
+      async (c) => {
+        const job = await this.observedJob(c, p, id);
+        if (!active.includes(job.state)) return job;
+        let actual;
+        try {
+          actual = await this.inspect(job);
+        } catch (e) {
+          if (
+            job.state === "preparing" &&
+            Date.now() - Date.parse(job.created_at) < 300000
+          )
+            return this.observedJob(c, p, id);
+          throw e;
+        }
         if (
+          !actual &&
           job.state === "preparing" &&
           Date.now() - Date.parse(job.created_at) < 300000
         )
-          return job;
-        throw e;
-      }
-      if (
-        !state &&
-        job.state === "preparing" &&
-        Date.now() - Date.parse(job.created_at) < 300000
-      )
-        return job;
-      if (!state) {
-        const failed = await put(c, "runtime_jobs", {
-          ...job,
-          state: "failed",
-          failure:
-            "Managed container is missing; inspect the retained checkout.",
+          return this.observedJob(c, p, id);
+        const next = !actual
+          ? "failed"
+          : actual.Paused
+            ? "paused"
+            : actual.Running
+              ? "running"
+              : "exited";
+        if (next === job.state) return this.observedJob(c, p, id);
+        return connectionTransaction(c, async (client) => {
+          await this.authorize(client, p, await this.job(client, id));
+          const saved = await this.persistObserved(client, job, {
+            state: next,
+            ...(!actual
+              ? {
+                  failure:
+                    "Managed container is missing; inspect the retained checkout.",
+                }
+              : { exit_code: actual.ExitCode }),
+          });
+          if (!saved) return this.job(client, id);
+          await this.service.audit(
+            client,
+            p,
+            "runtime_" + next,
+            id,
+            job.repo_id,
+          );
+          return saved;
         });
-        await this.service.audit(c, p, "runtime_failed", id, job.repo_id);
-        return failed;
-      }
-      const next = state.Paused
-        ? "paused"
-        : state.Running
-          ? "running"
-          : "exited";
-      if (job.state === next) return job;
-      const saved = await put(c, "runtime_jobs", {
-        ...job,
-        state: next,
-        exit_code: state.ExitCode,
-      });
-      await this.service.audit(c, p, "runtime_" + next, id, job.repo_id);
-      return saved;
-    });
+      },
+      () => ({ ...cached, refresh_pending: true }),
+    );
   }
   async control(p, id, action) {
     this.owner(p);
     if (!["pause", "resume", "cancel"].includes(action))
       error(400, "Unknown runtime control");
-    return transaction(this.pool, async (c) => {
-      const job = await this.job(c, id);
-      const actual = (await this.inspect(job)) || {
-        Running: false,
-        Paused: false,
-      };
-      if (action === "cancel" && job.state === "cancelled") return job;
-      if (!active.includes(job.state) || job.state === "preparing")
-        error(409, "Job is not available for this control");
-      if (
-        (action === "pause" && job.state !== "running") ||
-        (action === "resume" && job.state !== "paused")
-      )
-        error(409, "Invalid runtime transition");
-      if (action !== "cancel" && !actual.Running)
-        error(409, "Worker is not running; refresh its status");
-      // Cancellation remains available after revocation so an operator can always stop a worker.
-      if (action !== "cancel") await this.writable(c, job);
-      if (action === "cancel" && actual.Paused)
-        await this.docker(["unpause", this.container(id)]);
-      if (action !== "cancel" || actual.Running)
-        await this.docker([
-          action === "pause"
-            ? "pause"
-            : action === "resume"
-              ? "unpause"
-              : "kill",
-          this.container(id),
-        ]);
-      const saved = await put(c, "runtime_jobs", {
-        ...job,
-        state:
-          action === "pause"
-            ? "paused"
-            : action === "resume"
-              ? "running"
-              : "cancelled",
-      });
-      if (action === "cancel") {
-        const task = await get(c, "tasks", job.task_id);
-        if (task?.claimed_by === job.agent_id && task.state === "in_progress") {
-          await put(c, "tasks", { ...task, state: "blocked" });
-          await put(c, "task_events", {
-            id: randomUUID(),
-            repo_id: job.repo_id,
-            task_id: job.task_id,
-            agent_id: job.agent_id,
-            action: "runtime_cancelled",
-            state: "blocked",
-            comment:
-              "Managed worker cancelled; review its isolated diff before restarting.",
+    return this.withJobLock(
+      id,
+      async (c) => {
+        const job = await this.observedJob(c, p, id);
+        if (action === "cancel" && job.state === "cancelled") return job;
+        if (!active.includes(job.state) || job.state === "preparing")
+          error(409, "Job is not available for this control");
+        if (
+          (action === "pause" && job.state !== "running") ||
+          (action === "resume" && job.state !== "paused")
+        )
+          error(409, "Invalid runtime transition");
+        if (action !== "cancel") await this.observedJob(c, p, id, true);
+        const actual = (await this.inspect(job)) || {
+          Running: false,
+          Paused: false,
+        };
+        if (action !== "cancel" && !actual.Running)
+          error(409, "Worker is not running; refresh its status");
+        if (action === "cancel" && actual.Paused)
+          await this.docker(["unpause", this.container(id)]);
+        if (action !== "cancel" || actual.Running)
+          await this.docker([
+            action === "pause"
+              ? "pause"
+              : action === "resume"
+                ? "unpause"
+                : "kill",
+            this.container(id),
+          ]);
+        return connectionTransaction(c, async (client) => {
+          const current = await this.job(client, id);
+          await this.authorize(client, p, current);
+          if (action !== "cancel") await this.writable(client, current);
+          const saved = await this.persistObserved(client, job, {
+            state:
+              action === "pause"
+                ? "paused"
+                : action === "resume"
+                  ? "running"
+                  : "cancelled",
           });
-        }
-        await c.query(
-          "UPDATE file_reservations SET body=jsonb_set(body,'{state}','\"released\"') WHERE agent_id=$1 AND body->>'task_id'=$2 AND body->>'state'='active'",
-          [job.agent_id, job.task_id],
-        );
-      }
-      await this.service.audit(c, p, "runtime_" + action, id, job.repo_id);
-      return saved;
-    });
+          if (!saved)
+            error(
+              409,
+              "Job changed during the Docker operation; refresh its status",
+            );
+          if (action === "cancel") {
+            const task = await get(client, "tasks", job.task_id);
+            if (
+              task?.claimed_by === job.agent_id &&
+              task.state === "in_progress"
+            ) {
+              await put(client, "tasks", { ...task, state: "blocked" });
+              await put(client, "task_events", {
+                id: randomUUID(),
+                repo_id: job.repo_id,
+                task_id: job.task_id,
+                agent_id: job.agent_id,
+                action: "runtime_cancelled",
+                state: "blocked",
+                comment:
+                  "Managed worker cancelled; review its isolated diff before restarting.",
+              });
+            }
+            await client.query(
+              "UPDATE file_reservations SET body=jsonb_set(body,'{state}','\"released\"') WHERE agent_id=$1 AND body->>'task_id'=$2 AND body->>'state'='active'",
+              [job.agent_id, job.task_id],
+            );
+          }
+
+          await this.service.audit(
+            client,
+            p,
+            "runtime_" + action,
+            id,
+            job.repo_id,
+          );
+          return saved;
+        });
+      },
+      () => error(409, "A runtime operation is in progress; retry shortly"),
+    );
   }
   async contained(workspace, input) {
     const normalized = normalizePath(input);
