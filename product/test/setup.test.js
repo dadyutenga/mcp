@@ -47,15 +47,27 @@ test("headless setup provisions two repos, keeps credentials private, and scopes
     for (const name of ["backend", "admin-ui"]) {
       const repo = path.join(root, name);
       await mkdir(repo);
-      await mkdir(path.join(repo, ".cursor"));
+      const ideClient = name === "backend" ? "cursor" : "antigravity";
+      const selected =
+        ideClient === "cursor" ? ".cursor/mcp.json" : ".agents/mcp_config.json";
+      const other =
+        ideClient === "cursor" ? ".agents/mcp_config.json" : ".cursor/mcp.json";
+      await mkdir(path.dirname(path.join(repo, selected)));
       await writeFile(
-        path.join(repo, ".cursor/mcp.json"),
+        path.join(repo, selected),
         JSON.stringify({
-          mcpServers: { existing: { command: "existing-tool" } },
+          mcpServers: {
+            existing: { command: "existing-tool" },
+            "local-agent-coordination": {
+              command: process.execPath,
+              args: ["/old/tools/agent-coordination/src/server.js"],
+            },
+          },
         }),
       );
       const config = {
         ...credentials,
+        client: ideClient,
         repo: name,
         reference: repo,
         agent: name + " agent",
@@ -76,26 +88,29 @@ test("headless setup provisions two repos, keeps credentials private, and scopes
       const setup = JSON.parse(execution.stdout);
       inputs.push({ config, setup });
       const token = (await readFile(config.token_file, "utf8")).trim();
-      const cursor = await readFile(
-          path.join(repo, ".cursor/mcp.json"),
-          "utf8",
-        ),
-        antigravity = await readFile(
-          path.join(repo, ".agents/mcp_config.json"),
-          "utf8",
-        );
-      assert.ok(!cursor.includes(token) && !antigravity.includes(token));
+      const configured = await readFile(path.join(repo, selected), "utf8");
+      assert.ok(!configured.includes(token));
       assert.equal(
-        JSON.parse(cursor).mcpServers.existing.command,
+        JSON.parse(configured).mcpServers.existing.command,
         "existing-tool",
       );
       assert.equal(
-        JSON.parse(cursor).mcpServers.coordination.env.COORDINATION_REPO_ID,
+        JSON.parse(configured).mcpServers.coordination.env.COORDINATION_REPO_ID,
         setup.repo_id,
       );
-      assert.match(
-        await readFile(path.join(repo, ".gitignore"), "utf8"),
-        /\.cursor\/mcp.json/,
+      assert.deepEqual(Object.keys(JSON.parse(configured).mcpServers).sort(), [
+        "coordination",
+        "existing",
+      ]);
+      assert.equal(setup.server_name, "coordination");
+      assert.equal(setup.client, ideClient);
+      assert.deepEqual(setup.configurations, [path.join(repo, selected)]);
+      assert.deepEqual(setup.replaced_servers, ["local-agent-coordination"]);
+      await assert.rejects(readFile(path.join(repo, other)), /ENOENT/);
+      assert.ok(
+        (await readFile(path.join(repo, ".gitignore"), "utf8")).includes(
+          "/" + selected,
+        ),
       );
       const client = new Client({ name: "setup-" + name, version: "1" });
       await client.connect(
@@ -177,7 +192,10 @@ test("headless setup provisions two repos, keeps credentials private, and scopes
     );
     if (process.platform !== "win32") {
       await chmod(inputs[0].config.token_file, 0o644);
-      await assert.rejects(privateFile(inputs[0].config.token_file), /mode 600/);
+      await assert.rejects(
+        privateFile(inputs[0].config.token_file),
+        /mode 600/,
+      );
       await chmod(inputs[0].config.token_file, 0o600);
     }
     await provision({ ...inputs[0].config, permissions: ["task:read"] });
