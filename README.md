@@ -139,4 +139,4 @@ and authenticated HTTP/stdio MCP access. Existing local MCP mode is unchanged.
 See the [product runbook](product/README.md) for Compose startup, agent connection,
 backup/restore, legacy import, verification commands and the supported local operating boundary. The release
 includes a real Compose/browser/MCP acceptance harness, reviewed multi-repo import,
-backup/restore verification, and explicit unsupported runtime capabilities.
+backup/restore verification, and optional managed Docker jobs with real start/pause/resume/cancel controls and lease-enforced writes in isolated checkouts. External IDE file reservations remain cooperative.

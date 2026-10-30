@@ -57,18 +57,18 @@ export function discoverLegacy(root) {
       )
         visit(target);
       else if (entry.isFile() && /\.(?:sqlite|sqlite3|db)$/.test(entry.name)) {
-        const db = new Database(target, {
-          readonly: true,
-          fileMustExist: true,
-        });
+        let db;
         try {
+          db = new Database(target, { readonly: true, fileMustExist: true });
           found.push({
             path: target,
             version: db.pragma("user_version", { simple: true }),
             bytes: statSync(target).size,
           });
+        } catch {
+          // A corrupt or unreadable candidate must not hide valid neighbours.
         } finally {
-          db.close();
+          db?.close();
         }
       }
     }

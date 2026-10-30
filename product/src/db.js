@@ -1,5 +1,5 @@
 import pg from "pg";
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 export const tables = [
   "projects",
   "repositories",
@@ -149,6 +149,12 @@ export async function database(url) {
         ALTER TABLE shared_context_items ADD CONSTRAINT positive_context_version CHECK(body ? 'context_version' AND (body->>'context_version')::integer>=1);
         INSERT INTO schema_migrations(version) VALUES(8)`);
     }
+    if (Number(rows[0].v) < 9) {
+      await c.query(`ALTER TABLE runtime_jobs ADD COLUMN task_id uuid GENERATED ALWAYS AS ((body->>'task_id')::uuid) STORED REFERENCES tasks(id);
+        CREATE UNIQUE INDEX active_runtime_task ON runtime_jobs(task_id) WHERE body->>'state' IN ('preparing','running','paused');
+        ALTER TABLE runtime_jobs ADD CONSTRAINT runtime_state CHECK(body->>'state' IN ('preparing','running','paused','exited','cancelled','failed'));
+        INSERT INTO schema_migrations(version) VALUES(9)`);
+    }
     await c.query("COMMIT");
   } catch (e) {
     migrationError = e;
@@ -162,11 +168,13 @@ export async function database(url) {
   }
   return pool;
 }
-export async function transaction(pool, fn) {
+export async function transaction(pool, fn, { readOnly = false } = {}) {
   const c = await pool.connect();
   try {
-    await c.query("BEGIN");
-    await c.query("SELECT pg_advisory_xact_lock(431002)");
+    await c.query(
+      readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN",
+    );
+    if (!readOnly) await c.query("SELECT pg_advisory_xact_lock(431002)");
     const r = await fn(c);
     await c.query("COMMIT");
     return r;

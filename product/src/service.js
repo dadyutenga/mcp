@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
-import { transaction, get, list, put } from "./db.js";
+import { transaction, get, list, put, hydrate } from "./db.js";
 import { rejectSecrets } from "./secrets.js";
 export const hash = (s) => createHash("sha256").update(s).digest("hex");
 const canonical = (value) =>
@@ -213,19 +213,21 @@ export class Service {
         fail(401, "Expired or revoked token");
     }
   }
+  async grants(c, agent) {
+    return (
+      await c.query(
+        "SELECT * FROM agent_repo_grants WHERE agent_id=$1 AND (body->>'expires_at' IS NULL OR (body->>'expires_at')::timestamptz>now()) ORDER BY id",
+        [agent],
+      )
+    ).rows.map(hydrate);
+  }
   async authorize(c, p, repo, permission) {
     if (p.owner) return;
-    const grants = await list(c, "agent_repo_grants");
-    if (
-      !grants.some(
-        (g) =>
-          g.agent_id === p.id &&
-          g.repo_id === repo &&
-          g.permissions.includes(permission) &&
-          (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-      )
-    )
-      fail(403, "Permission denied");
+    const result = await c.query(
+      "SELECT 1 FROM agent_repo_grants WHERE agent_id=$1 AND repo_id=$2 AND body->'permissions' ? $3 AND (body->>'expires_at' IS NULL OR (body->>'expires_at')::timestamptz>now()) LIMIT 1",
+      [p.id, repo, permission],
+    );
+    if (!result.rowCount) fail(403, "Permission denied");
   }
   async audit(c, p, action, id, repo = null, metadata = {}, recipient = null) {
     const r = (
@@ -282,9 +284,26 @@ export class Service {
       throw error;
     });
   }
-  async read(p, kind, { after = "", limit = 50, id, full = false } = {}) {
+  async read(
+    p,
+    kind,
+    {
+      after = "",
+      limit = 50,
+      id,
+      repo_id,
+      task_id,
+      request_id,
+      agent_id,
+      full = false,
+    } = {},
+  ) {
     if (after) z.uuid().parse(after);
     if (id) z.uuid().parse(id);
+    if (repo_id) z.uuid().parse(repo_id);
+    if (task_id) z.uuid().parse(task_id);
+    if (request_id) z.uuid().parse(request_id);
+    if (agent_id) z.uuid().parse(agent_id);
     if (
       !Number.isInteger(Number(limit)) ||
       Number(limit) < 1 ||
@@ -315,190 +334,215 @@ export class Service {
       ].includes(kind)
     )
       fail(404, "Unknown resource");
-    return transaction(this.pool, async (c) => {
-      await this.assertPrincipal(c, p);
-      let rows = await list(c, kind);
-      if (!p.owner) {
-        const grants = (await list(c, "agent_repo_grants")).filter(
-          (g) =>
-            g.agent_id === p.id &&
-            (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-        );
-        const allowed = (repo, perm) =>
-          grants.some(
-            (g) => g.repo_id === repo && g.permissions.includes(perm),
-          );
-        if (
-          [
-            "agents",
-            "agent_tokens",
-            "agent_repo_grants",
-            "imports",
-            "runtime_jobs",
-            "messages",
-            "legacy_approvals",
-            "legacy_audit",
-            "handoffs",
-            "import_plans",
-          ].includes(kind)
-        )
-          fail(403, "Owner only");
-        if (kind === "projects")
-          rows = rows.filter((r) => grants.some((g) => g.project_id === r.id));
-        else if (kind === "repositories")
-          rows = rows.filter((r) => grants.some((g) => g.repo_id === r.id));
-        else if (kind === "cross_repo_requests")
-          rows = rows.filter(
-            (r) =>
-              (r.requester === p.id &&
-                allowed(r.repo_id, "cross_repo:request")) ||
-              allowed(r.target_repo, "cross_repo:approve"),
-          );
-        else if (kind === "cross_repo_responses") {
-          const reqs = await list(c, "cross_repo_requests");
-          rows = rows.filter((r) =>
-            reqs.some(
-              (q) =>
-                q.id === r.request_id &&
-                ((q.requester === p.id &&
-                  allowed(q.repo_id, "cross_repo:request")) ||
-                  allowed(q.target_repo, "cross_repo:approve")),
-            ),
-          );
-        } else if (kind === "shared_context_items")
-          rows = rows.filter(
-            (r) =>
-              allowed(r.repo_id, "context:read") ||
-              r.permitted_repos.some((repo) => allowed(repo, "context:read")),
-          );
-        else rows = rows.filter((r) => allowed(r.repo_id, "task:read"));
-      }
-      rows = rows
-        .filter((r) => r.id > after && (!id || r.id === id))
-        .sort((a, b) => a.id.localeCompare(b.id));
-      const n = Math.min(50, Math.max(1, Number(limit) || 20));
-      const selected = [];
-      let bytes = 0;
-      for (const row of rows.slice(0, n)) {
-        const x = { ...row };
-        delete x.hash;
-        delete x.records;
-        if (x.legacy_record) {
-          x.legacy_record_summary = {
-            id: x.legacy_record.id,
-            fields: Object.keys(x.legacy_record),
-          };
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const params = [];
+        const bind = (value) => {
+          params.push(value);
+          return "$" + params.length;
+        };
+        const filters = [];
+        if (after) filters.push(`r.id>${bind(after)}::uuid`);
+        if (id) filters.push(`r.id=${bind(id)}::uuid`);
+        if (repo_id) filters.push(`r.repo_id=${bind(repo_id)}::uuid`);
+        if (task_id) filters.push(`r.body->>'task_id'=${bind(task_id)}`);
+        if (request_id)
+          filters.push(`r.body->>'request_id'=${bind(request_id)}`);
+        if (agent_id) filters.push(`r.agent_id=${bind(agent_id)}::uuid`);
+        if (!p.owner) {
           if (
-            !p.owner ||
-            Buffer.byteLength(JSON.stringify(x.legacy_record)) > 16000
-          ) {
-            delete x.legacy_record;
-            x.truncated = true;
-          }
+            [
+              "agents",
+              "agent_tokens",
+              "agent_repo_grants",
+              "imports",
+              "runtime_jobs",
+              "messages",
+              "legacy_approvals",
+              "legacy_audit",
+              "handoffs",
+              "import_plans",
+            ].includes(kind)
+          )
+            fail(403, "Owner only");
+          const actor = bind(p.id);
+          const effective = `g.agent_id=${actor}::uuid AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now())`;
+          const grant = (repo, permission) =>
+            `EXISTS(SELECT 1 FROM agent_repo_grants g WHERE ${effective} AND g.repo_id=${repo} AND g.body->'permissions' ? '${permission}')`;
+          const requestAccess = (q) =>
+            `((${q}.body->>'requester'=${actor} AND ${grant(q + ".repo_id", "cross_repo:request")}) OR ${grant(q + ".target_repo_id", "cross_repo:approve")})`;
+          if (kind === "projects")
+            filters.push(
+              `EXISTS(SELECT 1 FROM agent_repo_grants g WHERE ${effective} AND g.project_id=r.id)`,
+            );
+          else if (kind === "repositories")
+            filters.push(
+              `EXISTS(SELECT 1 FROM agent_repo_grants g WHERE ${effective} AND g.repo_id=r.id)`,
+            );
+          else if (kind === "cross_repo_requests")
+            filters.push(requestAccess("r"));
+          else if (kind === "cross_repo_responses")
+            filters.push(
+              `EXISTS(SELECT 1 FROM cross_repo_requests q WHERE q.id=r.request_id AND ${requestAccess("q")})`,
+            );
+          else if (kind === "shared_context_items")
+            filters.push(
+              `EXISTS(SELECT 1 FROM agent_repo_grants g WHERE ${effective} AND g.body->'permissions' ? 'context:read' AND (g.repo_id=r.repo_id OR r.body->'permitted_repos' ? g.repo_id::text))`,
+            );
+          else filters.push(grant("r.repo_id", "task:read"));
         }
-        if (!p.owner && full !== true && full !== "true") {
-          for (const field of ["content", "description", "message", "summary"])
-            if (typeof x[field] === "string" && x[field].length > 320) {
-              x[field] = x[field].slice(0, 320) + "…";
+        const n = Number(limit);
+        const rows = (
+          await c.query(
+            `SELECT r.* FROM ${kind} r ${filters.length ? "WHERE " + filters.join(" AND ") : ""} ORDER BY r.id LIMIT ${bind(n + 1)}`,
+            params,
+          )
+        ).rows.map(hydrate);
+        const selected = [];
+        let bytes = 0;
+        for (const row of rows.slice(0, n)) {
+          const x = { ...row };
+          delete x.hash;
+          delete x.records;
+          if (x.legacy_record) {
+            x.legacy_record_summary = {
+              id: x.legacy_record.id,
+              fields: Object.keys(x.legacy_record),
+            };
+            if (
+              !p.owner ||
+              Buffer.byteLength(JSON.stringify(x.legacy_record)) > 16000
+            ) {
+              delete x.legacy_record;
               x.truncated = true;
             }
-        }
-        if (kind === "import_plans") {
-          delete x.plan;
-          if (x.preview)
-            x.preview = {
-              issues: x.preview.issues,
-              proposed_count: x.preview.proposed?.length,
-            };
-        }
-        if (
-          kind === "cross_repo_requests" &&
-          !["answered", "denied", "revoked"].includes(x.state) &&
-          Date.parse(x.expires_at) <= Date.now()
-        )
-          x.state = "expired";
-        if (
-          kind === "file_reservations" &&
-          x.state === "active" &&
-          Date.parse(x.expires_at) <= Date.now()
-        )
-          x.state = "expired";
-        if (Buffer.byteLength(JSON.stringify(x)) > 30000) {
-          for (const field of Object.keys(x)) {
-            if (typeof x[field] === "string" && x[field].length > 500)
-              x[field] = x[field].slice(0, 500) + "…";
-            else if (Array.isArray(x[field]) && x[field].length > 10)
-              x[field] = x[field].slice(-10);
           }
-          x.truncated = true;
-        }
-        if (Buffer.byteLength(JSON.stringify(x)) > 30000) {
-          for (const field of Object.keys(x))
-            if (
-              x[field] &&
-              typeof x[field] === "object" &&
-              !Array.isArray(x[field]) &&
-              !(x[field] instanceof Date)
-            )
-              x[field] = {
-                omitted: true,
-                reason:
-                  "Large historical data is retained in the private import archive and backup.",
+          if (!p.owner && full !== true && full !== "true") {
+            for (const field of [
+              "content",
+              "description",
+              "message",
+              "summary",
+            ])
+              if (typeof x[field] === "string" && x[field].length > 320) {
+                x[field] = x[field].slice(0, 320) + "…";
+                x.truncated = true;
+              }
+          }
+          if (kind === "import_plans") {
+            delete x.plan;
+            if (x.preview)
+              x.preview = {
+                issues: x.preview.issues,
+                proposed_count: x.preview.proposed?.length,
               };
-          x.truncated = true;
+          }
+          if (
+            kind === "cross_repo_requests" &&
+            !["answered", "denied", "revoked"].includes(x.state) &&
+            Date.parse(x.expires_at) <= Date.now()
+          )
+            x.state = "expired";
+          if (
+            kind === "file_reservations" &&
+            x.state === "active" &&
+            Date.parse(x.expires_at) <= Date.now()
+          )
+            x.state = "expired";
+          if (Buffer.byteLength(JSON.stringify(x)) > 30000) {
+            for (const field of Object.keys(x)) {
+              if (typeof x[field] === "string" && x[field].length > 500)
+                x[field] = x[field].slice(0, 500) + "…";
+              else if (Array.isArray(x[field]) && x[field].length > 10)
+                x[field] = x[field].slice(-10);
+            }
+            x.truncated = true;
+          }
+          if (Buffer.byteLength(JSON.stringify(x)) > 30000) {
+            for (const field of Object.keys(x))
+              if (
+                x[field] &&
+                typeof x[field] === "object" &&
+                !Array.isArray(x[field]) &&
+                !(x[field] instanceof Date)
+              )
+                x[field] = {
+                  omitted: true,
+                  reason:
+                    "Large historical data is retained in the private import archive and backup.",
+                };
+            x.truncated = true;
+          }
+          const size = Buffer.byteLength(JSON.stringify(x));
+          if (bytes + size > 32768 && selected.length) break;
+          selected.push(x);
+          bytes += size;
         }
-        const size = Buffer.byteLength(JSON.stringify(x));
-        if (bytes + size > 32768 && selected.length) break;
-        selected.push(x);
-        bytes += size;
-      }
-      return {
-        items: selected,
-        has_more: rows.length > selected.length,
-        next_cursor: selected.at(-1)?.id || after,
-      };
-    });
+        return {
+          items: selected,
+          has_more: rows.length > selected.length,
+          next_cursor: selected.at(-1)?.id || after,
+        };
+      },
+      { readOnly: true },
+    );
   }
   async identity(p) {
-    return transaction(this.pool, async (c) => {
-      await this.assertPrincipal(c, p);
-      const grants = (await list(c, "agent_repo_grants")).filter(
-        (g) =>
-          g.agent_id === p.id &&
-          (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-      );
-      return {
-        agent_id: p.id,
-        grants: grants.map((g) => ({
-          repo_id: g.repo_id,
-          project_id: g.project_id,
-          body: {
-            permissions: g.permissions,
-            expires_at: g.expires_at || null,
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const grants = await this.grants(c, p.id);
+        return {
+          agent_id: p.id,
+          grants: grants.map((g) => ({
+            repo_id: g.repo_id,
+            project_id: g.project_id,
+            body: {
+              permissions: g.permissions,
+              expires_at: g.expires_at || null,
+            },
+          })),
+          capabilities: {
+            ...(this.runtime?.capabilities() || {
+              start: false,
+              pause: false,
+              resume: false,
+              cancel: false,
+              isolatedWorktrees: false,
+              enforcedWrites: false,
+            }),
+            external_agent_control: false,
+            advisory_reservations: true,
           },
-        })),
-        capabilities: {
-          start: false,
-          pause: false,
-          resume: false,
-          cancel: false,
-          advisory_reservations: true,
-        },
-      };
-    });
+        };
+      },
+      { readOnly: true },
+    );
   }
   async resource(p, kind, id) {
     const result = await this.read(p, kind, { id, full: true, limit: 1 });
     return result.items[0] || fail(404, "Unknown or unauthorized resource");
   }
-  async notifications(p, after = 0) {
+  async notifications(p, after = 0, { before, latest = false } = {}) {
     if (!p.owner) fail(403, "Owner only");
-    return (
+    if (
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      (before !== undefined &&
+        (!Number.isSafeInteger(Number(before)) || Number(before) < 1))
+    )
+      fail(400, "Invalid notification cursor");
+    const descending = latest || before !== undefined;
+    const rows = (
       await this.pool.query(
-        "SELECT a.*,r.read_at FROM audit_events a LEFT JOIN notification_receipts r ON r.event_id=a.id AND r.user_id=$1 WHERE a.id>$2 ORDER BY a.id LIMIT 100",
-        [p.id, after],
+        `SELECT a.*,r.read_at FROM audit_events a LEFT JOIN notification_receipts r ON r.event_id=a.id AND r.user_id=$1 WHERE ${before !== undefined ? "a.id<$2" : "a.id>$2"} ORDER BY a.id ${descending ? "DESC" : "ASC"} LIMIT 100`,
+        [p.id, before ?? after],
       )
     ).rows;
+    return descending ? rows.reverse() : rows;
   }
   async markRead(p, eventId) {
     if (!p.owner) fail(403, "Owner only");
@@ -522,49 +566,53 @@ export class Service {
   async events(p, after = 0) {
     if (!Number.isSafeInteger(after) || after < 0)
       fail(400, "Invalid event cursor");
-    return transaction(this.pool, async (c) => {
-      await this.assertPrincipal(c, p);
-      const high = Number(
-        (await c.query("SELECT COALESCE(max(id),0) AS id FROM audit_events"))
-          .rows[0].id,
-      );
-      if (after > high)
-        fail(
-          409,
-          "Event cursor is ahead of this database; resync from cursor 0",
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const high = Number(
+          (await c.query("SELECT COALESCE(max(id),0) AS id FROM audit_events"))
+            .rows[0].id,
         );
-      if (p.owner)
+        if (after > high)
+          fail(
+            409,
+            "Event cursor is ahead of this database; resync from cursor 0",
+          );
+        if (p.owner)
+          return (
+            await c.query(
+              "SELECT * FROM audit_events WHERE id>$1 ORDER BY id LIMIT 100",
+              [after],
+            )
+          ).rows;
+        const grants = (await this.grants(c, p.id)).filter(
+          (g) =>
+            g.agent_id === p.id &&
+            g.permissions.includes("task:read") &&
+            (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
+        );
         return (
           await c.query(
-            "SELECT * FROM audit_events WHERE id>$1 ORDER BY id LIMIT 100",
-            [after],
+            "SELECT * FROM audit_events WHERE id>$1 AND ((recipient_agent_id IS NULL AND (actor=$2 OR repo_id=ANY($3))) OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))) ORDER BY id LIMIT 100",
+            [
+              after,
+              p.id,
+              grants.map((g) => g.repo_id),
+              (await this.grants(c, p.id))
+                .filter(
+                  (g) =>
+                    g.agent_id === p.id &&
+                    g.permissions.includes("cross_repo:request") &&
+                    (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
+                )
+                .map((g) => g.repo_id),
+            ],
           )
         ).rows;
-      const grants = (await list(c, "agent_repo_grants")).filter(
-        (g) =>
-          g.agent_id === p.id &&
-          g.permissions.includes("task:read") &&
-          (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-      );
-      return (
-        await c.query(
-          "SELECT * FROM audit_events WHERE id>$1 AND ((recipient_agent_id IS NULL AND (actor=$2 OR repo_id=ANY($3))) OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))) ORDER BY id LIMIT 100",
-          [
-            after,
-            p.id,
-            grants.map((g) => g.repo_id),
-            (await list(c, "agent_repo_grants"))
-              .filter(
-                (g) =>
-                  g.agent_id === p.id &&
-                  g.permissions.includes("cross_repo:request") &&
-                  (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-              )
-              .map((g) => g.repo_id),
-          ],
-        )
-      ).rows;
-    });
+      },
+      { readOnly: true },
+    );
   }
   async execute(p, action, input, key) {
     if (!schemas[action]) fail(404, "Unknown action");
@@ -574,15 +622,7 @@ export class Service {
       await this.assertPrincipal(c, p);
       const requestHash = hash(canonical(x));
       const authorizationHash = hash(
-        canonical(
-          p.owner
-            ? { owner: true }
-            : (await list(c, "agent_repo_grants")).filter(
-                (g) =>
-                  g.agent_id === p.id &&
-                  (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
-              ),
-        ),
+        canonical(p.owner ? { owner: true } : await this.grants(c, p.id)),
       );
       if (key) {
         z.string().min(1).max(128).parse(key);

@@ -600,6 +600,10 @@ test("browser sign-in, project creation, real resource rendering and responsive 
   });
   try {
     const page = await browser.newPage();
+    const notificationReads = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/notifications?")) notificationReads.push(r.url());
+    });
     await page.goto(`http://127.0.0.1:${server.server.address().port}`);
     await page.getByLabel("Username").fill("owner");
     await page
@@ -619,6 +623,20 @@ test("browser sign-in, project creation, real resource rendering and responsive 
     await page
       .getByRole("heading", { name: "Browser verified project", exact: true })
       .waitFor();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
+    const unread = page
+      .getByRole("button", { name: "Mark read", exact: true })
+      .first();
+    const eventId = await unread.evaluate(
+      (el) => el.closest("article").dataset.eventId,
+    );
+    await unread.click();
+    await page
+      .locator('[data-event-id="' + eventId + '"]')
+      .getByRole("button", { name: "Mark read", exact: true })
+      .waitFor({ state: "hidden" });
+    assert.ok(notificationReads.some((url) => /after=[1-9]/.test(url)));
+    assert.ok(!notificationReads.some((url) => /after=0(?:&|$)/.test(url)));
     // An interrupted background refresh must recover without leaving a stale alert.
     const unavailable = "**/api/v1/resources/projects?*";
     await page.route(unavailable, (route) => route.abort("failed"));

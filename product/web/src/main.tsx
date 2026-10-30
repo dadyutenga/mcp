@@ -17,6 +17,7 @@ const resources = [
   "shared_context_items",
   "imports",
   "import_plans",
+  "runtime_jobs",
 ];
 const pages: Record<string, string> = {
   Overview: "",
@@ -29,6 +30,7 @@ const pages: Record<string, string> = {
   Context: "shared_context_items",
   Activity: "",
   Settings: "",
+  "Managed jobs": "runtime_jobs",
 };
 const permissions = [
   "task:read",
@@ -43,6 +45,7 @@ const permissions = [
   "cross_repo:approve",
 ];
 const operations: Record<string, Record<string, string>> = {
+  runtime_start: { task_id: "text", profile: "runtime_profile" },
   project_create: { name: "text", description: "textarea" },
   repo_create: {
     project_id: "projects",
@@ -187,6 +190,11 @@ function App() {
     [sessions, setSessions] = useState<Row[]>([]),
     [historyKind, setHistoryKind] = useState("messages"),
     [historyPage, setHistoryPage] = useState<Row | null>(null);
+  const [resourcePages, setResourcePages] = useState<Record<string, Row>>({});
+  const [cursors, setCursors] = useState<Record<string, string>>({});
+  const auditCursor = useRef<number | null>(null);
+  const streamCursor = useRef(0);
+  const references = new Set(["projects", "repositories", "agents"]);
   const requestKey = useRef(crypto.randomUUID());
   const refreshing = useRef(false),
     pendingRefresh = useRef(false);
@@ -221,29 +229,34 @@ function App() {
         pendingRefresh.current = false;
         const entries = await Promise.all(
           resources.map(async (k) => {
-            let after = "";
+            let after = cursors[k] || "";
             const rows: Row[] = [];
-            for (;;) {
-              const p = await api("resources/" + k + "?after=" + after);
-              rows.push(...p.items);
-              if (!p.has_more) break;
-              if (p.next_cursor === after)
+            let result: Row;
+            do {
+              result = await api("resources/" + k + "?after=" + after);
+              rows.push(...result.items);
+              if (!references.has(k) || !result.has_more) break;
+              if (result.next_cursor === after)
                 throw Error("Resource cursor did not advance");
-              after = p.next_cursor;
-            }
-            return [k, rows] as const;
+              after = result.next_cursor;
+            } while (true);
+            return [k, rows, result] as const;
           }),
         );
-        setData(Object.fromEntries(entries));
-        const events: Row[] = [];
-        let after = 0;
-        for (;;) {
-          const next = await api("notifications?after=" + after);
-          events.push(...next);
-          if (next.length < 100) break;
-          after = Number(next.at(-1).id);
-        }
-        setAudit(events);
+        setData(Object.fromEntries(entries.map(([k, rows]) => [k, rows])));
+        setResourcePages(
+          Object.fromEntries(entries.map(([k, , result]) => [k, result])),
+        );
+        const events: Row[] = await api(
+          auditCursor.current === null
+            ? "notifications?latest=true"
+            : "notifications?after=" + auditCursor.current,
+        );
+        if (events.length) auditCursor.current = Number(events.at(-1)!.id);
+        else if (auditCursor.current === null) auditCursor.current = 0;
+        setAudit((old) => [
+          ...new Map([...old, ...events].map((e) => [e.id, e])).values(),
+        ]);
         setSettings(await api("settings"));
         setOps(await api("operations"));
         setSessions(await api("auth/sessions"));
@@ -256,7 +269,7 @@ function App() {
       refreshing.current = false;
       setLoading(false);
     }
-  }, [api]);
+  }, [api, cursors]);
   useEffect(() => {
     api("auth/setup")
       .then((x) => setSetup(x.bootstrap_required))
@@ -274,23 +287,40 @@ function App() {
   }, []);
   useEffect(() => {
     if (!csrf) return;
-    refresh();
-    const es = new EventSource("/api/v1/events");
+    let closed = false;
+    let es: EventSource | undefined;
     let debounce: ReturnType<typeof setTimeout>;
-    es.onopen = () => setLive(true);
-    es.onmessage = () => {
-      clearTimeout(debounce);
-      debounce = setTimeout(refresh, 100);
-    };
-    es.onerror = () => setLive(false);
+    (async () => {
+      await refresh();
+      if (closed) return;
+      streamCursor.current = Math.max(
+        streamCursor.current,
+        auditCursor.current || 0,
+      );
+      es = new EventSource("/api/v1/events?after=" + streamCursor.current);
+      es.onopen = () => setLive(true);
+      es.onmessage = (event) => {
+        streamCursor.current =
+          Number(event.lastEventId) || streamCursor.current;
+        clearTimeout(debounce);
+        debounce = setTimeout(refresh, 100);
+      };
+      es.onerror = () => setLive(false);
+    })();
     const timer = setInterval(refresh, 15000);
     return () => {
       clearTimeout(debounce);
-      es.close();
+      closed = true;
+      es?.close();
       clearInterval(timer);
     };
   }, [csrf, refresh]);
   async function run(action: string, input: Row) {
+    if (action === "runtime_start")
+      return api("runtime/start", {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
     return api("actions/" + action, {
       method: "POST",
       headers: ["agent_enroll", "agent_rotate"].includes(action)
@@ -319,6 +349,9 @@ function App() {
     e.preventDefault();
     setBusy(true);
     setError("");
+    setAudit([]);
+    auditCursor.current = null;
+    streamCursor.current = 0;
     const f = Object.fromEntries(new FormData(e.currentTarget));
     try {
       if (setup) {
@@ -385,15 +418,86 @@ function App() {
     data[kind]?.find((r) => r.id === id)?.name ||
     data[kind]?.find((r) => r.id === id)?.title ||
     id;
+  function relatedFilters(
+    resource: string,
+    id: string,
+  ): Record<string, Record<string, string>> {
+    if (resource === "tasks")
+      return {
+        task_events: { task_id: id },
+        task_dependencies: { task_id: id },
+        cross_repo_requests: { task_id: id },
+      };
+    if (resource === "agents")
+      return {
+        agent_tokens: { agent_id: id },
+        agent_repo_grants: { agent_id: id },
+      };
+    if (resource === "cross_repo_requests")
+      return { cross_repo_responses: { request_id: id } };
+    return {};
+  }
   async function viewRecord(resource: string, record: Row) {
     try {
-      setSelected({
-        ...(await api("resources/" + resource + "/" + record.id)),
-        resource,
-      });
+      const [item, related] = await Promise.all([
+        api("resources/" + resource + "/" + record.id),
+        Promise.all(
+          Object.entries(relatedFilters(resource, record.id)).map(
+            async ([kind, filter]) =>
+              [
+                kind,
+                await api(
+                  "resources/" + kind + "?" + new URLSearchParams(filter),
+                ),
+              ] as const,
+          ),
+        ),
+      ]);
+      setSelected({ ...item, resource, related: Object.fromEntries(related) });
     } catch (e) {
       setError(String(e));
     }
+  }
+  function relatedRows(kind: string): Row[] {
+    return selected?.related?.[kind]?.items || [];
+  }
+  function relatedPagination(kind: string) {
+    const next = selected?.related?.[kind];
+    if (!next?.has_more) return null;
+    return (
+      <button
+        onClick={async () => {
+          try {
+            const id = selected!.id;
+            const filter = relatedFilters(selected!.resource, id)[kind];
+            const result = await api(
+              "resources/" +
+                kind +
+                "?" +
+                new URLSearchParams({ ...filter, after: next.next_cursor }),
+            );
+            setSelected((old) =>
+              old && old.id === id
+                ? {
+                    ...old,
+                    related: {
+                      ...old.related,
+                      [kind]: {
+                        ...result,
+                        items: [...old.related[kind].items, ...result.items],
+                      },
+                    },
+                  }
+                : old,
+            );
+          } catch (e) {
+            setError(String(e));
+          }
+        }}
+      >
+        Load more {human(kind)}
+      </button>
+    );
   }
   async function loadHistory(after = "") {
     setBusy(true);
@@ -405,6 +509,40 @@ function App() {
       setBusy(false);
     }
   }
+  function pagination(kind: string) {
+    if (references.has(kind)) return null;
+    return (
+      <div className="toolbar">
+        {cursors[kind] && (
+          <button onClick={() => setCursors((old) => ({ ...old, [kind]: "" }))}>
+            First {human(kind)} page
+          </button>
+        )}
+        {resourcePages[kind]?.has_more && (
+          <button
+            onClick={() =>
+              setCursors((old) => ({
+                ...old,
+                [kind]: resourcePages[kind].next_cursor,
+              }))
+            }
+          >
+            Next {human(kind)} page
+          </button>
+        )}
+      </div>
+    );
+  }
+  async function olderAudit() {
+    try {
+      const older = await api("notifications?before=" + audit[0]?.id);
+      setAudit((old) => [
+        ...new Map([...older, ...old].map((e) => [e.id, e])).values(),
+      ]);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   const repoName = (id: string) => label("repositories", id);
   const createAction: Record<string, string> = {
     Projects: "project_create",
@@ -413,6 +551,7 @@ function App() {
     Tasks: "task_create",
     "Cross-repo inbox": "request_create",
     Context: "context_publish",
+    "Managed jobs": "runtime_start",
   };
   const filtered = (data[pages[page]] || []).filter((r) =>
     JSON.stringify(r).toLowerCase().includes(search.toLowerCase()),
@@ -709,7 +848,7 @@ function App() {
                   .slice(-8)
                   .reverse()
                   .map((a) => (
-                    <article key={a.id}>
+                    <article key={a.id} data-event-id={a.id}>
                       <h3>{human(a.action)}</h3>
                       <small>{date(a.timestamp)}</small>
                     </article>
@@ -733,8 +872,11 @@ function App() {
               <p>PostgreSQL · {settings.database ? "Connected" : "Checking"}</p>
               <p>{settings.runtime?.reason}</p>
               <p>
-                Public endpoint: disabled by default. Worktree management:
-                unsupported.
+                Public endpoint: disabled by default. Managed worktrees:{" "}
+                {settings.runtime?.capabilities?.isolatedWorktrees
+                  ? "configured"
+                  : "not configured"}
+                .
               </p>
               <h3>Active owner sessions</h3>
               {sessions.map((s) => (
@@ -966,13 +1108,16 @@ function App() {
                 </button>
               )}
             </details>
+            {audit.length > 0 && (
+              <button onClick={olderAudit}>Load older activity</button>
+            )}
             {audit
               .filter((a) =>
                 JSON.stringify(a).toLowerCase().includes(search.toLowerCase()),
               )
               .reverse()
               .map((a) => (
-                <article key={a.id}>
+                <article key={a.id} data-event-id={a.id}>
                   <b>{human(a.action)}</b>
                   {!a.read_at && (
                     <button
@@ -983,7 +1128,16 @@ function App() {
                             method: "POST",
                             body: "{}",
                           });
-                          await refresh();
+                          setAudit((old) =>
+                            old.map((event) =>
+                              event.id === a.id
+                                ? {
+                                    ...event,
+                                    read_at: new Date().toISOString(),
+                                  }
+                                : event,
+                            ),
+                          );
                         } catch (e) {
                           setError(String(e));
                         }
@@ -1032,10 +1186,17 @@ function App() {
                 ))}
               </select>
             </div>
+            {page === "Managed jobs" && (
+              <p>
+                {settings.runtime?.reason} Job commands read an isolated
+                snapshot and propose changes; applying output requires live
+                reservations.
+              </p>
+            )}
             {page === "Reservations" && (
               <p>
-                Reservations are advisory. External IDE writes are not blocked.
-                No managed worktree adapter is installed.
+                Managed job writes require live reservations. External IDE
+                writes remain outside this service’s filesystem boundary.
               </p>
             )}
             {board && page === "Tasks" ? (
@@ -1057,6 +1218,7 @@ function App() {
             ) : (
               <div className="cards">{filtered.map(card)}</div>
             )}
+            {pagination(pages[page])}
             {!filtered.length && (
               <section className="empty">
                 <h2>
@@ -1130,6 +1292,61 @@ function App() {
                   >
                     Edit / archive
                   </button>
+                )}
+                {selected.resource === "runtime_jobs" && (
+                  <section>
+                    <p>
+                      State: {selected.state} · Source commit:{" "}
+                      {selected.source_commit}
+                    </p>
+                    {[
+                      "status",
+                      "pause",
+                      "resume",
+                      "cancel",
+                      "collect",
+                      "diff",
+                      "output",
+                    ].map((control) => (
+                      <button
+                        key={control}
+                        onClick={async () => {
+                          try {
+                            const result = await api(
+                              "runtime/" +
+                                selected.id +
+                                (control === "status" ? "" : "/" + control),
+                              control === "status" ||
+                                control === "diff" ||
+                                control === "output"
+                                ? {}
+                                : { method: "POST", body: "{}" },
+                            );
+                            if (control === "diff" || control === "output")
+                              setSelected((old) => ({
+                                ...old,
+                                [control]: result[control],
+                              }));
+                            else
+                              setSelected({
+                                ...(await api("runtime/" + selected.id)),
+                                resource: "runtime_jobs",
+                              });
+                            await refresh();
+                          } catch (e) {
+                            setError(String(e));
+                          }
+                        }}
+                      >
+                        {control === "collect"
+                          ? "Apply proposed files"
+                          : human(control)}
+                      </button>
+                    ))}
+                    {(selected.diff || selected.output) && (
+                      <pre>{selected.diff || selected.output}</pre>
+                    )}
+                  </section>
                 )}
                 {selected.resource === "agents" && (
                   <>
@@ -1257,7 +1474,7 @@ function App() {
               {selected.resource === "agents" && (
                 <>
                   <h3>Repository grants</h3>
-                  {data.agent_repo_grants
+                  {relatedRows("agent_repo_grants")
                     ?.filter((g) => g.agent_id === selected.id)
                     .map((g) => (
                       <article key={g.id}>
@@ -1273,8 +1490,9 @@ function App() {
                         )}
                       </article>
                     ))}
+                  {relatedPagination("agent_repo_grants")}
                   <h3>Tokens</h3>
-                  {data.agent_tokens
+                  {relatedRows("agent_tokens")
                     ?.filter((t) => t.agent_id === selected.id)
                     .map((t) => (
                       <article key={t.id}>
@@ -1294,12 +1512,13 @@ function App() {
                         </button>
                       </article>
                     ))}
+                  {relatedPagination("agent_tokens")}
                 </>
               )}
               {selected.resource === "tasks" && (
                 <>
                   <h3>Dependencies</h3>
-                  {data.task_dependencies
+                  {relatedRows("task_dependencies")
                     ?.filter((d) => d.task_id === selected.id)
                     .map((d) => (
                       <article key={d.id}>
@@ -1314,8 +1533,9 @@ function App() {
                         </button>
                       </article>
                     ))}
+                  {relatedPagination("task_dependencies")}
                   <h3>History & comments</h3>
-                  {data.task_events
+                  {relatedRows("task_events")
                     ?.filter((e) => e.task_id === selected.id)
                     .map((e) => (
                       <article key={e.id}>
@@ -1324,14 +1544,16 @@ function App() {
                         <small>{date(e.created_at)}</small>
                       </article>
                     ))}
+                  {relatedPagination("task_events")}
                   <h3>Linked requests</h3>
-                  {data.cross_repo_requests
+                  {relatedRows("cross_repo_requests")
                     ?.filter((q) => q.task_id === selected.id)
                     .map((q) => (
                       <article key={q.id}>
                         {q.scope} · {q.state}
                       </article>
                     ))}
+                  {relatedPagination("cross_repo_requests")}
                 </>
               )}
               {selected.resource === "cross_repo_requests" && (
@@ -1358,7 +1580,7 @@ function App() {
                     </article>
                   ))}
                   <h3>Responses</h3>
-                  {data.cross_repo_responses
+                  {relatedRows("cross_repo_responses")
                     ?.filter((r) => r.request_id === selected.id)
                     .map((r) => (
                       <article key={r.id}>
@@ -1374,6 +1596,7 @@ function App() {
                         </small>
                       </article>
                     ))}
+                  {relatedPagination("cross_repo_responses")}
                 </>
               )}
               <details>
@@ -1403,7 +1626,17 @@ function App() {
                 {Object.entries(operations[action]).map(([k, t]) => (
                   <label key={k}>
                     {human(k)}
-                    {t === "textarea" ? (
+                    {t === "runtime_profile" ? (
+                      <select aria-label={human(k)} name={k} required>
+                        {(settings.runtime?.profiles || []).map(
+                          (profile: string) => (
+                            <option key={profile} value={profile}>
+                              {profile}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    ) : t === "textarea" ? (
                       <textarea
                         aria-label={human(k)}
                         name={k}
