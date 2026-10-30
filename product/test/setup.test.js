@@ -175,9 +175,11 @@ test("headless setup provisions two repos, keeps credentials private, and scopes
       readFile(path.join(unconfigured, ".cursor/mcp.json")),
       /ENOENT/,
     );
-    await chmod(inputs[0].config.token_file, 0o644);
-    await assert.rejects(privateFile(inputs[0].config.token_file), /mode 600/);
-    await chmod(inputs[0].config.token_file, 0o600);
+    if (process.platform !== "win32") {
+      await chmod(inputs[0].config.token_file, 0o644);
+      await assert.rejects(privateFile(inputs[0].config.token_file), /mode 600/);
+      await chmod(inputs[0].config.token_file, 0o600);
+    }
     await provision({ ...inputs[0].config, permissions: ["task:read"] });
     const nowReadOnly = await clients[0].callTool({
       name: "task_create",
@@ -191,18 +193,22 @@ test("headless setup provisions two repos, keeps credentials private, and scopes
     });
     assert.equal(nowReadOnly.isError, true);
     const linked = path.join(root, "linked-private");
-    await symlink(inputs[0].config.repo_path, linked);
-    await assert.rejects(
-      provision({
-        ...inputs[0].config,
-        token_file: path.join(linked, "must-not-leak.token"),
-      }),
-      /outside the repository/,
-    );
-    await assert.rejects(
-      readFile(path.join(inputs[0].config.repo_path, "must-not-leak.token")),
-      /ENOENT/,
-    );
+    try {
+      await symlink(inputs[0].config.repo_path, linked);
+      await assert.rejects(
+        provision({
+          ...inputs[0].config,
+          token_file: path.join(linked, "must-not-leak.token"),
+        }),
+        /outside the repository/,
+      );
+      await assert.rejects(
+        readFile(path.join(inputs[0].config.repo_path, "must-not-leak.token")),
+        /ENOENT/,
+      );
+    } catch (e) {
+      if (e.code !== "EPERM") throw e;
+    }
     const inside = path.join(inputs[0].config.repo_path, "secret.token");
     await writeFile(inside, "must-not-be-used", { mode: 0o600 });
     await assert.rejects(
