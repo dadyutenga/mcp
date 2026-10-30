@@ -1,8 +1,9 @@
+import { MCP_SERVER_NAME } from "./configuration.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 export function mcp(service, principal) {
   const server = new McpServer({
-    name: "coordination-platform",
+    name: MCP_SERVER_NAME,
     version: "0.1.0",
   });
   const tool = (name, schema, run) =>

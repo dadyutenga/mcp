@@ -15,6 +15,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { privateFile, endpoint } from "./credentials.js";
+import {
+  MCP_SERVER_NAME,
+  clientConfiguration,
+  singleServerConfiguration,
+} from "./configuration.js";
 async function safePath(root, relative) {
   let current = root;
   for (const part of relative.split("/")) {
@@ -33,7 +38,9 @@ export async function installAgent({
   url = "http://127.0.0.1:4310/mcp",
   tokenFile,
   repoId,
+  client: ideClient = "cursor",
 }) {
+  const selectedConfig = clientConfiguration(ideClient);
   const root = await realpath(repo),
     credential = await realpath(tokenFile),
     relative = path.relative(root, credential);
@@ -81,41 +88,21 @@ export async function installAgent({
     },
   };
   const files = [];
-  for (const name of [".cursor/mcp.json", ".agents/mcp_config.json"]) {
-    const file = await safePath(root, name);
-    const text = await readFile(file, "utf8").catch((e) => {
-      if (e.code === "ENOENT") return "{}";
-      throw e;
-    });
-    if (Buffer.byteLength(text) > 1048576)
-      throw Error("Existing IDE configuration is too large");
-    const config = JSON.parse(text);
-    if (
-      !config ||
-      typeof config !== "object" ||
-      Array.isArray(config) ||
-      (config.mcpServers &&
-        (typeof config.mcpServers !== "object" ||
-          Array.isArray(config.mcpServers)))
-    )
-      throw Error("IDE configuration must contain an mcpServers object");
-    if (
-      config.mcpServers?.coordination &&
-      JSON.stringify(config.mcpServers.coordination) !==
-        JSON.stringify(definition)
-    )
-      throw Error(
-        "Existing coordination MCP entry differs; review it before replacing",
-      );
-    config.mcpServers = { ...config.mcpServers, coordination: definition };
-    files.push({ file, content: JSON.stringify(config, null, 2) + "\n" });
-  }
+  const file = await safePath(root, selectedConfig);
+  const text = await readFile(file, "utf8").catch((e) => {
+    if (e.code === "ENOENT") return "{}";
+    throw e;
+  });
+  if (Buffer.byteLength(text) > 1048576)
+    throw Error("Existing IDE configuration is too large");
+  const result = singleServerConfiguration(JSON.parse(text), definition);
+  files.push({ file, content: JSON.stringify(result.config, null, 2) + "\n" });
   const ignore = await safePath(root, ".gitignore");
   let ignored = await readFile(ignore, "utf8").catch((e) => {
     if (e.code === "ENOENT") return "";
     throw e;
   });
-  for (const rule of ["/.cursor/mcp.json", "/.agents/mcp_config.json"])
+  for (const rule of ["/" + selectedConfig])
     if (!ignored.split(/\r?\n/).includes(rule))
       ignored += (ignored && !ignored.endsWith("\n") ? "\n" : "") + rule + "\n";
   files.push({ file: ignore, content: ignored });
@@ -129,7 +116,13 @@ export async function installAgent({
       await unlink(temp).catch(() => {});
     }
   }
-  return { ...setup, configurations: files.slice(0, 2).map((x) => x.file) };
+  return {
+    ...setup,
+    server_name: MCP_SERVER_NAME,
+    client: ideClient,
+    replaced_servers: result.removed,
+    configurations: [file],
+  };
 }
 if (
   process.argv[1] &&
@@ -142,17 +135,19 @@ if (
         url: { type: "string" },
         "token-file": { type: "string" },
         "repo-id": { type: "string" },
+        client: { type: "string", default: "cursor" },
       },
     });
     if (!values.repo || !values["token-file"])
       throw Error(
-        "Use --repo /absolute/repo --token-file /absolute/private/agent.token [--repo-id UUID] [--url http://127.0.0.1:4310/mcp]",
+        "Use --repo /absolute/repo --token-file /absolute/private/agent.token [--repo-id UUID] [--url http://127.0.0.1:4310/mcp] [--client cursor|antigravity]",
       );
     const result = await installAgent({
       repo: values.repo,
       url: values.url,
       tokenFile: values["token-file"],
       repoId: values["repo-id"],
+      client: values.client,
     });
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {

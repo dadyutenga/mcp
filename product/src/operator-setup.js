@@ -8,6 +8,7 @@ import { installAgent } from "./setup.js";
 import { permissions } from "./service.js";
 const schema = z
   .object({
+    client: z.enum(["cursor", "antigravity"]).default("cursor"),
     url: z.string().default("http://127.0.0.1:4310/mcp"),
     username: z.string().min(3),
     password: z.string().min(12),
@@ -148,6 +149,7 @@ export async function provision(input) {
       url: mcp.href,
       tokenFile: tokenPath,
       repoId: repo.id,
+      client: config.client,
     });
     if (
       JSON.stringify([...setup.permissions].sort()) !==

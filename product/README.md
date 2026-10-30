@@ -35,6 +35,42 @@ npm run start:local --prefix product
 The bootstrap secret protects first-owner creation. It never grants agents broad
 access and does not require a browser. Existing owner accounts keep their passwords.
 
+## One MCP configuration
+
+Configure **one server named `coordination`**. Tasks, file leases, shared context,
+requests and runtime tools all come from this same endpoint. Do not add the old
+`local-agent-coordination` or `coordination-product` entry alongside it.
+
+Setup writes only the selected client's config: Cursor by default
+(`.cursor/mcp.json`), or Antigravity when `client: "antigravity"` / `--client
+antigravity` is selected (`.agents/mcp_config.json`). It does not generate both
+files automatically. Each IDE uses its own file format/path to connect to the
+same single service; those are not separate backends. The stdio bridge is a
+transport adapter within this entry, not another coordination server to configure.
+
+```json
+{
+  "mcpServers": {
+    "coordination": {
+      "command": "node",
+      "args": ["/absolute/path/to/mcp/product/src/bridge.js"],
+      "env": {
+        "COORDINATION_URL": "http://127.0.0.1:4310/mcp",
+        "COORDINATION_AGENT_TOKEN_FILE": "/absolute/private/agent.token",
+        "COORDINATION_REPO_ID": "<authorized-repo-uuid>"
+      }
+    }
+  }
+}
+```
+
+Rerunning setup replaces recognized old coordination entries in that selected
+file with this single entry. Other MCP integrations and other IDE files are
+untouched. Unrecognized/conflicting coordination definitions require review.
+Existing SQLite databases are retained; their data is not silently merged or
+deleted when the old registration is removed. Use the reviewed import flow when
+needed. Each agent keeps its own credentials and scopes while using the same URL.
+
 ## One-command operator setup for each repository
 
 Create an operator JSON file **outside source control**, mode 600. Its password is
@@ -44,6 +80,7 @@ first run. The first run also needs `bootstrap_secret` matching the server setti
 ```json
 {
   "url": "http://127.0.0.1:4310/mcp",
+  "client": "cursor",
   "username": "operator",
   "password": "REPLACE_WITH_PRIVATE_OPERATOR_PASSWORD",
   "bootstrap_secret": "REPLACE_WITH_SERVER_BOOTSTRAP_SECRET",
@@ -63,9 +100,10 @@ npm run setup:operator --prefix product -- --config /absolute/private/backend-se
 
 The command bootstraps/signs in the operator, finds or creates the named project
 and repo, enrolls a scoped agent, saves its token outside the repo, verifies its
-MCP setup, and merges the connection into `.cursor/mcp.json` and
-`.agents/mcp_config.json`. Other MCP entries are preserved. Configs reference the
-private token file; they contain no raw token. They are added to `.gitignore`.
+MCP setup, and writes one `coordination` entry to the selected client config.
+Other MCP integrations are preserved; recognized old coordination aliases are
+replaced. The config references the private token file, contains no raw token,
+and is added to `.gitignore`.
 The temporary operator session is logged out. No operator password or token is
 printed in setup output.
 
@@ -73,7 +111,7 @@ Run setup sequentially for a second JSON file with the **same project name**, a
 different repo/agent, its real `repo_path`, and a separate `token_file`. Both repos
 then coordinate through the same service and retain their own identities and
 permissions. Repeating setup with the same token file reuses that identity; a
-conflicting existing IDE connection is rejected for explicit review. The owner
+conflicting unrecognized IDE connection is rejected for explicit review. The owner
 configuration supplies the desired repo permissions. The default worker can
 create its own tasks but cannot approve cross-repo requests; use an explicit
 `permissions` array to delegate approval deliberately.
@@ -83,10 +121,12 @@ Restart/refresh the IDE MCP connection after setup. For an already enrolled agen
 ```sh
 npm run setup:agent --prefix product -- \
   --repo /absolute/path/to/backend \
+  --client cursor \
   --url http://127.0.0.1:4310/mcp \
   --token-file /absolute/private/coordination/backend.token
 ```
 
+Omit `--client` for Cursor, or select `--client antigravity` for Antigravity.
 Use `--repo-id UUID` if its token has several active repo grants. Setup verifies
 `agent_setup` against the live service before touching IDE config files. Credential
 files must be private, owned by the current user and outside the target repo;
@@ -182,9 +222,9 @@ npm audit --prefix product --omit=dev
 git diff --check
 ```
 
-Verification for this headless release passed: all 29 product tests with the real
-Docker runtime gate enabled (zero skips), all 22 legacy tests, all 14 headless
-Compose checks, TypeScript build, production audit (zero findings) and diff checks.
+Validation covers live MCP/owner APIs, private credentials, single-entry alias
+migration, one selected client config, repeat setup, Windows-style legacy paths,
+repo authorization, real Docker controls and backward-compatible local mode.
 
 No browser/Chromium is required. The Compose gate builds the actual image and tests
 headless operator/MCP flows, races, import, restart, fresh backup restore, newer

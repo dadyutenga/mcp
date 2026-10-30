@@ -1,3 +1,4 @@
+import { MCP_SERVER_NAME } from "./configuration.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -32,7 +33,7 @@ if (process.env.COORDINATION_REPO_ID) {
   if (result.isError) throw Error("Agent repository setup is not authorized");
 }
 const local = new Server(
-  { name: "coordination-platform", version: "0.1.0" },
+  { name: MCP_SERVER_NAME, version: "0.1.0" },
   { capabilities: { tools: {} } },
 );
 local.setRequestHandler(ListToolsRequestSchema, () => remote.listTools());
