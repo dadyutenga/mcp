@@ -39,6 +39,7 @@ const uuid = z.uuid(),
   short = text.max(500);
 export const permissions = [
   "task:read",
+  "task:create",
   "task:claim",
   "task:update",
   "task:comment",
@@ -522,6 +523,90 @@ export class Service {
       { readOnly: true },
     );
   }
+  async setup(p, { repo_id } = {}) {
+    if (repo_id) z.uuid().parse(repo_id);
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const grants = await this.grants(c, p.id);
+        const grant = repo_id
+          ? grants.find((g) => g.repo_id === repo_id)
+          : grants.length === 1
+            ? grants[0]
+            : null;
+        if (!grant)
+          fail(409, "Supply a repo_id from identity_get's active grants");
+        const repo = await get(c, "repositories", grant.repo_id),
+          project = repo && (await get(c, "projects", repo.project_id));
+        if (
+          !repo ||
+          !project ||
+          repo.status === "archived" ||
+          project.status === "archived"
+        )
+          fail(409, "Repository or project unavailable");
+        return {
+          agent_id: p.id,
+          repo_id: repo.id,
+          project_id: project.id,
+          repository: {
+            name: repo.name,
+            reference: repo.reference,
+            default_branch: repo.default_branch,
+          },
+          permissions: grant.permissions,
+          startup_tools: ["identity_get", "state_snapshot", "events_poll"],
+          coordination_tools: [
+            "tasks_list",
+            "task_create",
+            "task_claim",
+            "task_update",
+            "task_handoff",
+            "reservation_acquire",
+            "reservation_release",
+            "context_publish",
+            "request_create",
+          ],
+        };
+      },
+      { readOnly: true },
+    );
+  }
+  async peers(p, { repo_id, after = "", limit = 50 } = {}) {
+    if (repo_id) z.uuid().parse(repo_id);
+    if (after) z.uuid().parse(after);
+    z.number().int().min(1).max(50).parse(limit);
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const rows = (
+          await c.query(
+            `SELECT DISTINCT a.id,a.body->>'name' AS name,a.body->>'heartbeat' AS last_active FROM agents a JOIN agent_repo_grants peer ON peer.agent_id=a.id
+        WHERE COALESCE((a.body->>'revoked')::boolean,false)=false AND (peer.body->>'expires_at' IS NULL OR (peer.body->>'expires_at')::timestamptz>now())
+        AND EXISTS(SELECT 1 FROM agent_repo_grants own WHERE own.agent_id=$1 AND own.repo_id=peer.repo_id AND own.body->'permissions' ? 'task:read' AND (own.body->>'expires_at' IS NULL OR (own.body->>'expires_at')::timestamptz>now()))
+        AND ($2::uuid IS NULL OR peer.repo_id=$2) AND ($3::uuid IS NULL OR a.id>$3) ORDER BY a.id LIMIT $4`,
+            [p.id, repo_id || null, after || null, limit + 1],
+          )
+        ).rows;
+        return {
+          items: rows
+            .slice(0, limit)
+            .map((r) => ({
+              ...r,
+              state:
+                r.last_active && Date.parse(r.last_active) > Date.now() - 900000
+                  ? "online"
+                  : "stale",
+            })),
+          has_more: rows.length > limit,
+          next_cursor: rows.slice(0, limit).at(-1)?.id || after,
+        };
+      },
+      { readOnly: true },
+    );
+  }
   async resource(p, kind, id) {
     const result = await this.read(p, kind, { id, full: true, limit: 1 });
     return result.items[0] || fail(404, "Unknown or unauthorized resource");
@@ -795,7 +880,12 @@ export class Service {
         });
       }
       if (action === "task_create") {
-        owner();
+        if (!p.owner) {
+          await this.authorize(c, p, x.repo_id, "task:create");
+          if (x.assignee && x.assignee !== p.id)
+            fail(403, "Agents may only assign new tasks to themselves");
+          x.assignee = p.id;
+        }
         const repo = await need("repositories", x.repo_id);
         if (
           repo.status === "archived" ||

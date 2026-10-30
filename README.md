@@ -1,142 +1,76 @@
-# Local Multi-Agent Coordination MCP
+# MCP Agent Coordination
 
-A local Model Context Protocol (MCP) workspace and coordination server that enables multiple coding agents—such as **Cursor** (`cursor-backend`) and **Google Antigravity** (`antigravity-frontend`)—to collaborate safely in a shared repository using a single local SQLite database.
+A **headless coordination service** for agents working across two or more repositories.
+Agents connect through MCP to share work status, coordinate tasks and file leases,
+publish versioned context, request scoped help, and discover authorized peers.
+There is no frontend or browser setup.
 
-No cloud service, Docker container, or external database is required. Each IDE launches its own stdio MCP server process pointing to the same repository root and SQLite WAL database.
+The central product uses PostgreSQL, authenticated Streamable HTTP MCP and a stdio
+bridge for Cursor/Antigravity. Private token files identify agents and repo grants
+limit their access. A connecting agent cannot impersonate another agent by choosing
+a name, header or query parameter.
 
----
+## Start and set up agents
 
-## Key Features
-
-- **Session-Bound Agent Identities**: Agents register a stable identity (`cursor-backend`, `antigravity-frontend`, etc.) that binds their stdio session for all write operations and survives IDE restarts via `state_snapshot`.
-- **Task & Dependency Management**: Create, assign, atomically claim, update, block, and complete tasks with acceptance criteria, dependency cycle detection, and required verification evidence.
-- **File Ownership & Atomic Reservations**: Enforce path-based ownership policies (`ownership-policy.json`) and time-limited exclusive write or shared read leases (`file_reserve`, `file_reserve_batch`) before editing files.
-- **Cross-Agent Messaging & Change Requests**: Exchange durable, task-linked messages, API/contract change requests, and scoped file ownership approval requests (`file_ownership_request`).
-- **Audit Trail & Concurrency Safety**: Backed by SQLite in WAL mode with immediate write transactions, foreign key enforcement, and a complete mutation audit log (`audit_list`).
-
----
-
-## Repository Structure
-
-```text
-.
-├── AGENTS.md                        # Multi-agent file ownership and reservation protocol rules
-├── README.md                        # General project documentation
-└── tools/
-    └── agent-coordination/          # Local MCP server package
-        ├── README.md                # Detailed MCP server & workflow documentation
-        ├── ownership-policy.json    # Path ownership rules and lease duration settings
-        ├── package.json             # Node.js >= 22 package configuration and scripts
-        ├── src/
-        │   ├── server.js            # MCP stdio server and tool registrations
-        │   ├── core.js              # Agents, tasks, messages, change requests, and audit logic
-        │   ├── files.js             # File ownership, conflict checks, and reservation leases
-        │   ├── db.js                # SQLite connection, schema migrations, and project root resolution
-        │   ├── paths.js             # Canonical repository path validation and glob matching
-        │   ├── setup.js             # IDE MCP config generator (.cursor/mcp.json & .agents/mcp_config.json)
-        │   └── cli.js               # Database health check and reset CLI
-        └── test/                    # Unit, integration, and multi-process concurrency tests
+```sh
+cp product/.env.example product/.env
+# Replace the placeholders with independently generated random values.
+chmod 600 product/.env
+docker compose --env-file product/.env up --build --wait
 ```
 
-Generated local state (ignored by Git):
-- `.local/agent-coordination/coordination.sqlite` — Shared SQLite database created automatically on startup.
-- `.cursor/mcp.json` — Local Cursor MCP server configuration.
-- `.agents/mcp_config.json` — Local Google Antigravity MCP server configuration.
+For an existing local PostgreSQL service, configure `DATABASE_URL` and
+`BOOTSTRAP_SECRET` in the private `product/.env`, then:
 
----
-
-## Requirements & Quickstart
-
-- **Node.js 22+** and **npm** (Windows, macOS, or Linux)
-
-Install dependencies, configure both IDEs, and verify the SQLite database from `tools/agent-coordination`:
-
-```powershell
-cd tools/agent-coordination
-npm ci
-npm run setup
-npm run db:check
+```sh
+npm ci --prefix product
+npm run build --prefix product
+npm run start:local --prefix product
 ```
 
-After running `npm run setup`, restart or refresh the MCP servers in Cursor and Google Antigravity so they pick up the generated configuration.
+Prepare a private operator JSON file using the [setup example](product/README.md#one-command-operator-setup-for-each-repository):
 
-### Using in Another Repository
-
-Copy the `tools/agent-coordination` directory (excluding `node_modules`) into the target repository's `tools/agent-coordination` folder, then run `npm ci` and `npm run setup`. Customize `tools/agent-coordination/ownership-policy.json` to match your repository's directory layout.
-
----
-
-## Agent Coordination Workflow
-
-All participating agents follow the protocol defined in [`AGENTS.md`](AGENTS.md):
-
-1. **Register & Recover State**: Call `agent_register` with a stable identity (`cursor-backend` or `antigravity-frontend`), then call `state_snapshot` and `file_coordination_status` to inspect open tasks, unread messages, and active file leases.
-2. **Claim a Task**: Create or locate the target task and call `task_claim` before starting work.
-3. **Check & Reserve Files**: Run `file_ownership_check` / `file_conflict_check` and acquire a lease with `file_reserve_batch` before modifying any files. If a file is owned by another agent, request scoped access via `file_ownership_request`.
-4. **Maintain Leases**: Edit only files covered by an active reservation and renew leases (`file_reservation_renew`) during long-running work.
-5. **Verify, Complete & Release**: Run tests, record modified files and verification evidence with `task_complete`, release reservations via `file_reservation_release`, and notify peers if needed.
-
----
-
-## MCP Tools Overview
-
-| Category | Tools |
-| :--- | :--- |
-| **Agents** | `agent_register`, `agent_list`, `agent_heartbeat`, `state_snapshot` |
-| **Tasks** | `task_create`, `task_get`, `task_list`, `task_assign`, `task_claim`, `task_update`, `task_complete`, `task_dependency_add`, `task_dependency_remove` |
-| **Messages** | `message_send`, `message_list`, `message_acknowledge` |
-| **Change Requests** | `change_request_create`, `change_request_list`, `change_request_respond` |
-| **File Coordination** | `file_ownership_check`, `file_reserve`, `file_reserve_batch`, `file_reservation_list`, `file_reservation_renew`, `file_reservation_release`, `file_conflict_check`, `file_conflict_list`, `file_ownership_request`, `file_ownership_respond`, `file_ownership_request_list`, `file_coordination_status` |
-| **Audit** | `audit_list` |
-
----
-
-## Testing & Maintenance
-
-Run the test suites and database health checks from `tools/agent-coordination`:
-
-```powershell
-npm test
-npm run test:integration
-npm run test:concurrency
-npm run db:check
+```sh
+npm run setup:operator --prefix product -- --config /absolute/private/backend-setup.json
+npm run setup:operator --prefix product -- --config /absolute/private/admin-ui-setup.json
 ```
 
-To intentionally wipe all local coordination history (with all IDE MCP server processes stopped):
+Use the same project name and distinct repo/agent/token paths. Setup provisions
+resources, stores credentials outside the repos, verifies MCP access, and merges
+Cursor and Antigravity configurations while preserving existing MCP entries.
+Already enrolled agents can run `setup:agent`. Restart the IDE MCP connection after
+setup. Neither a frontend nor manual database edits are needed.
 
-```powershell
-npm run db:reset -- --yes-i-understand-this-deletes-coordination-data
-```
+## Coordination tools
 
-For full details on policy matching rules, reservation lifecycles, and conflict recovery, see [`tools/agent-coordination/README.md`](tools/agent-coordination/README.md).
+- Setup/discovery: `agent_setup`, `identity_get`, `agent_list`, `state_snapshot`.
+- Tasks: `task_create`, `tasks_list/get`, `task_claim`, `task_update`, `task_comment`,
+  `task_handoff`, plus dependency checks and versioned lifecycle history.
+- Files: `reservation_acquire`, `reservation_release`, `file_reservations_list/get`.
+- Context: `context_publish`, `shared_context_items_list/get`.
+- Cross-repo requests: `request_create`, `request_clarify`, `request_decide`,
+  `request_answer`, and scoped request/response list/get tools.
+- Incremental changes: `events_poll` with a retained cursor.
 
-## Share status and context between repositories
+SQL authorization and pagination bound reads. Transactions serialize conflicting
+writes. Context is immutable and versioned; secret values are screened before
+publication. Cross-repo responses require explicit approval and remain private.
 
-Use a **workspace** to link two or more repos while keeping their local tasks and
-file reservations independent. New workspace tools share status, immutable
-versioned context, handoffs with acknowledgment/resolution, and incremental change
-cursors through `~/.config/local-agent-coordination/workspaces.sqlite` (or the same
-absolute `AGENT_COORDINATION_WORKSPACE_DB` path configured in both clients).
+Optional managed Docker jobs support start/pause/resume/cancel, isolated checkouts
+and lease-enforced writes. Docker calls do not hold the global mutation lock.
+External IDE filesystem writes remain cooperative; use OS isolation when needed.
 
-After `agent_register`, create a workspace with `workspace_create({name:
-"ride-hailing"})`. Call `workspace_join` in each repo's MCP session with the returned
-`workspace_id` and distinct repo slugs such as `backend` and `admin-ui`. Then use
-`status_post` / `status_get`, `context_publish` / `context_get`, `handoff_send` /
-`handoff_inbox`, and `changes_since` to coordinate. Existing single-repo workflows
-need no configuration changes.
+See the [product runbook](product/README.md) for permissions, per-repo agent
+instructions, API setup, import, backup/restore, validation and runtime configuration.
 
-See [the cross-repo setup guide](tools/agent-coordination/README.md#share-context-across-different-repositories)
-for both clients' configuration, example calls, limits, security behavior, and
-copy-paste AGENTS.md / CLAUDE.md snippets for each side.
+## Compatibility and development
 
-## Operator web panel and authenticated central service
+The original trusted-local SQLite MCP server remains available at
+[`tools/agent-coordination`](tools/agent-coordination/README.md). It supports
+single-repo coordination and centrally stored workspace status/context across
+repos without requiring PostgreSQL. It is a separate compatibility mode.
 
-An additive PostgreSQL-backed product now lives in [`product/`](product/README.md).
-It provides owner sign-in, projects/repos, scoped agent enrollment, tasks,
-approval-gated cross-repo requests, advisory reservations, audit history, live SSE,
-and authenticated HTTP/stdio MCP access. Existing local MCP mode is unchanged.
-
-See the [product runbook](product/README.md) for Compose startup, agent connection,
-backup/restore, legacy import, verification commands and the supported local operating boundary. The release
-includes a real Compose/browser/MCP acceptance harness, reviewed multi-repo import,
-backup/restore verification, and optional managed Docker jobs with real start/pause/resume/cancel controls and lease-enforced writes in isolated checkouts. External IDE file reservations remain cooperative.
+Coding agents modifying this repository follow [AGENTS.md](AGENTS.md), including
+the file ownership/reservation protocol. Product tests require a disposable
+PostgreSQL database; `RUN_DOCKER_RUNTIME_TESTS=1` enables the real runtime gate.
+`npm run test:compose --prefix product` checks a complete disposable headless stack.
