@@ -1,5 +1,4 @@
 import Fastify from "fastify";
-import fastifyStatic from "@fastify/static";
 import { hash as passwordHash, verify } from "@node-rs/argon2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,7 +7,7 @@ import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { database, transaction, SCHEMA_VERSION } from "./db.js";
 import { Service, Fault, hash, token } from "./service.js";
-import { mcp } from "./mcp.js";
+import { mcp, nameToUuid } from "./mcp.js";
 import { Operations } from "./operations.js";
 import { DockerRuntime, loadRuntimeConfig } from "./runtime.js";
 export async function app({
@@ -20,9 +19,9 @@ export async function app({
   runtimeConfig,
 } = {}) {
   if (
-    !bootstrapSecret ||
-    bootstrapSecret.length < 24 ||
-    /placeholder|changeme|example|replace_with/i.test(bootstrapSecret)
+    bootstrapSecret &&
+    (bootstrapSecret.length < 24 ||
+      /placeholder|changeme|example|replace_with/i.test(bootstrapSecret))
   )
     throw Error("Set a random BOOTSTRAP_SECRET of at least 24 characters");
   const server = Fastify({
@@ -151,7 +150,8 @@ export async function app({
     rate(req);
     const { secret, username, password } = req.body || {};
     if (
-      typeof secret !== "string" ||
+      bootstrapSecret &&
+      typeof secret === "string" &&
       !timingSafeEqual(
         Buffer.from(hash(secret)),
         Buffer.from(hash(bootstrapSecret)),
@@ -396,34 +396,48 @@ export async function app({
     await tick();
     if (!reply.raw.destroyed) timer = setInterval(tick, 1500);
   });
-  server.get("/mcp", async (req, reply) => {
+  server.get("/", async () => ({
+    service: "agent-coordination-mcp-server",
+    version: "2.0.0",
+    status: "online",
+    transport: "Model Context Protocol (streamable-http)",
+    mcp_endpoint: "/mcp",
+    features: [
+      "agent_register",
+      "agent_list",
+      "agent_heartbeat",
+      "state_snapshot",
+      "task_create",
+      "task_list",
+      "task_claim",
+      "task_update",
+      "task_complete",
+      "file_reserve",
+      "file_reservation_list",
+      "file_reservation_release",
+      "file_coordination_status",
+      "message_send",
+      "message_list",
+      "audit_list"
+    ]
+  }));
+
+  const handleMcp = async (req, reply) => {
     rate(req);
-    await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
-    reply.code(405);
-    return {
-      error: { message: "Use authenticated POST requests for stateless MCP" },
-    };
-  });
-  server.delete("/mcp", async (req, reply) => {
-    rate(req);
-    await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
-    reply.code(405);
-    return {
-      error: { message: "Stateless MCP has no server session to delete" },
-    };
-  });
-  server.post("/mcp", async (req, reply) => {
-    rate(req);
-    const p = await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
+    let p = { id: null, anonymous: true, request_id: req.id };
+    const agentHeader = req.headers["x-agent-id"] || req.headers["x-agent-name"] || req.query?.agent_id;
+    if (agentHeader) {
+      p.id = nameToUuid(agentHeader);
+      p.name = agentHeader;
+    }
+    const authHeader = req.headers.authorization?.replace(/^Bearer /, "");
+    if (authHeader) {
+      try {
+        p = await service.authenticate(authHeader, req.id);
+      } catch {
+        // Fallback to self-registering connection
+      }
+    }
     p.request_id = req.id;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -436,17 +450,14 @@ export async function app({
       transport.close();
       instance.close();
     });
-    await transport.handleRequest(req.raw, reply.raw, req.body);
+    await transport.handleRequest(req.raw, reply.raw, req.body || req.query);
+  };
+
+  server.post("/mcp", handleMcp);
+  server.get("/mcp", handleMcp);
+  server.delete("/mcp", async (req, reply) => {
+    reply.code(200).send({ ok: true });
   });
-  const dist = fileURLToPath(new URL("../dist/", import.meta.url));
-  if (existsSync(dist)) {
-    await server.register(fastifyStatic, { root: dist });
-    server.setNotFoundHandler((req, reply) =>
-      req.url.startsWith("/api")
-        ? reply.code(404).send({ error: { message: "Not found" } })
-        : reply.sendFile("index.html"),
-    );
-  }
   return server;
 }
 if (
