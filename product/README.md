@@ -347,6 +347,17 @@ tasks or their configured time limit. Daemon outages report unavailable; they do
 not fabricate successful controls. A stopped service cannot enforce time limits
 until it restarts. Keep the service running while jobs are active.
 
+Docker inspection and controls run outside SQL transactions under a non-blocking
+per-job session lock. Short persistence transactions compare the observed job
+version and state before updating. At most two Docker operations per API database
+pool run concurrently, retaining pool capacity for other requests. A busy status
+response includes `refresh_pending: true` with the last persisted state; busy
+controls return 409 for retry. Failed or conflicting operations release their
+job lock and connection slot, and stale results cannot overwrite newer state.
+Four additional lock regressions bring the product suite to 27 tests; these cover
+blocked Docker calls, stale state/version guards, pool capacity and failure cleanup.
+
+
 This adapter runs the API as a **host Node.js process**, with Git and Docker CLI,
 on the same host/filesystem as its selected Docker daemon. Default Compose mode
 continues without a Docker socket or privileged runtime access. Do not mount a

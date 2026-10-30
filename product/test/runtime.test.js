@@ -14,7 +14,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { database } from "../src/db.js";
+import { database, transaction, put, get } from "../src/db.js";
 import { Service, permissions } from "../src/service.js";
 import { DockerRuntime } from "../src/runtime.js";
 import { dockerConnection } from "../src/docker.js";
@@ -443,5 +443,258 @@ test("unconfigured managed runtime reports unavailable and authenticated owner r
   } finally {
     await server.close();
     await pool.end();
+  }
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+}
+async function promptly(promise) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(Error("Unrelated mutation waited for Docker")),
+          1500,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function lockFixture() {
+  const pool = await database(process.env.TEST_DATABASE_URL),
+    service = new Service(pool),
+    owner = { id: randomUUID(), owner: true };
+  const project = await service.execute(owner, "project_create", {
+    name: "Runtime lock fixture",
+  });
+  const repo = await service.execute(owner, "repo_create", {
+    project_id: project.id,
+    name: "Fixture",
+    reference: "fixture",
+  });
+  const enrolled = await service.execute(owner, "agent_enroll", {
+    name: "Worker",
+    grants: [{ repo_id: repo.id, permissions }],
+  });
+  const principal = await service.authenticate(enrolled.token);
+  const createJob = async () => {
+    const task = await service.execute(owner, "task_create", {
+      repo_id: repo.id,
+      title: "Fixture job",
+      description: "Lock regression",
+    });
+    await service.execute(principal, "task_claim", { id: task.id });
+    return transaction(pool, (c) =>
+      put(c, "runtime_jobs", {
+        id: randomUUID(),
+        task_id: task.id,
+        repo_id: repo.id,
+        project_id: project.id,
+        agent_id: principal.id,
+        state: "running",
+      }),
+    );
+  };
+  return {
+    pool,
+    service,
+    owner,
+    createJob,
+    runtime: new DockerRuntime(pool, service),
+  };
+}
+test("slow inspection leaves mutations available and cannot overwrite a newer job state", async () => {
+  const f = await lockFixture(),
+    entered = deferred(),
+    answer = deferred();
+  let operation, mutation;
+  try {
+    const job = await f.createJob();
+    f.runtime.inspect = async () => {
+      entered.resolve();
+      return answer.promise;
+    };
+    operation = f.runtime.status(f.owner, job.id);
+    await entered.promise;
+    mutation = f.service.execute(f.owner, "project_create", {
+      name: "Available during inspection",
+    });
+    await promptly(mutation);
+    await transaction(f.pool, async (c) => {
+      const current = await get(c, "runtime_jobs", job.id);
+      await put(c, "runtime_jobs", { ...current, state: "cancelled" });
+    });
+    answer.resolve({ Running: false, Paused: false, ExitCode: 0 });
+    assert.equal((await operation).state, "cancelled");
+    assert.equal(
+      (await get(f.pool, "runtime_jobs", job.id)).state,
+      "cancelled",
+    );
+    assert.equal(
+      (
+        await f.pool.query(
+          "SELECT 1 FROM audit_events WHERE resource_id=$1 AND action='runtime_exited'",
+          [job.id],
+        )
+      ).rowCount,
+      0,
+    );
+    // A metadata-only version change must also invalidate the observation.
+    const newer = await f.createJob(),
+      versionEntered = deferred(),
+      versionAnswer = deferred();
+    f.runtime.inspect = async () => {
+      versionEntered.resolve();
+      return versionAnswer.promise;
+    };
+    const versionOperation = f.runtime.status(f.owner, newer.id);
+    try {
+      await versionEntered.promise;
+      await transaction(f.pool, async (c) => {
+        const current = await get(c, "runtime_jobs", newer.id);
+        await put(c, "runtime_jobs", { ...current, note: "newer metadata" });
+      });
+      versionAnswer.resolve({ Running: true, Paused: true, ExitCode: 0 });
+      const result = await versionOperation;
+      assert.equal(result.state, "running");
+      assert.equal(result.note, "newer metadata");
+    } finally {
+      versionAnswer.resolve({ Running: true, Paused: false });
+      await versionOperation.catch(() => {});
+    }
+  } finally {
+    answer.resolve({ Running: true, Paused: false });
+    await operation?.catch(() => {});
+    await mutation?.catch(() => {});
+    await f.pool.end();
+  }
+});
+test("slow controls do not block service writes and reject stale completion", async () => {
+  const f = await lockFixture(),
+    entered = deferred(),
+    answer = deferred();
+  let operation, mutation;
+  try {
+    const job = await f.createJob();
+    f.runtime.inspect = async () => ({ Running: true, Paused: false });
+    f.runtime.docker = async (args) => {
+      assert.equal(args[0], "pause");
+      entered.resolve();
+      await answer.promise;
+    };
+    operation = f.runtime.control(f.owner, job.id, "pause");
+    operation.catch(() => {});
+    await entered.promise;
+    mutation = f.service.execute(f.owner, "project_create", {
+      name: "Available during pause",
+    });
+    await promptly(mutation);
+    await transaction(f.pool, async (c) => {
+      const current = await get(c, "runtime_jobs", job.id);
+      await put(c, "runtime_jobs", { ...current, state: "cancelled" });
+    });
+    answer.resolve();
+    await assert.rejects(operation, /changed during the Docker operation/);
+    assert.equal(
+      (await get(f.pool, "runtime_jobs", job.id)).state,
+      "cancelled",
+    );
+    assert.equal(
+      (
+        await f.pool.query(
+          "SELECT 1 FROM audit_events WHERE resource_id=$1 AND action='runtime_pause'",
+          [job.id],
+        )
+      ).rowCount,
+      0,
+    );
+  } finally {
+    answer.resolve();
+    await operation?.catch(() => {});
+    await mutation?.catch(() => {});
+    await f.pool.end();
+  }
+});
+test("per-job locks serialize adapters without exhausting the service pool", async () => {
+  const f = await lockFixture(),
+    firstEntered = deferred(),
+    secondEntered = deferred(),
+    answer = deferred();
+  let first, second, mutation;
+  try {
+    const one = await f.createJob(),
+      two = await f.createJob(),
+      three = await f.createJob();
+    f.runtime.inspect = async (job) => {
+      (job.id === one.id ? firstEntered : secondEntered).resolve();
+      return answer.promise;
+    };
+    first = f.runtime.status(f.owner, one.id);
+    await firstEntered.promise;
+    const otherAdapter = new DockerRuntime(f.pool, f.service);
+    otherAdapter.inspect = async () => {
+      throw Error("Overlapping control entered Docker");
+    };
+    await assert.rejects(
+      otherAdapter.control(f.owner, one.id.toUpperCase(), "pause"),
+      /operation is in progress/,
+    );
+    const pending = await otherAdapter.status(f.owner, one.id);
+    assert.equal(pending.refresh_pending, true);
+    second = f.runtime.status(f.owner, two.id);
+    await secondEntered.promise;
+    const saturated = await f.runtime.status(f.owner, three.id);
+    assert.equal(saturated.refresh_pending, true);
+    mutation = f.service.execute(f.owner, "project_create", {
+      name: "Available with saturated runtime slots",
+    });
+    await promptly(mutation);
+    answer.resolve({ Running: true, Paused: false });
+    await Promise.all([first, second]);
+    otherAdapter.inspect = async () => ({ Running: true, Paused: false });
+    otherAdapter.docker = async () => {};
+    assert.equal(
+      (await otherAdapter.control(f.owner, one.id, "pause")).state,
+      "paused",
+    );
+  } finally {
+    answer.resolve({ Running: true, Paused: false });
+    await Promise.allSettled([first, second, mutation].filter(Boolean));
+    await f.pool.end();
+  }
+});
+test("failed Docker operations release the per-job lock and runtime slot", async () => {
+  const f = await lockFixture();
+  try {
+    const job = await f.createJob();
+    f.runtime.inspect = async () => {
+      throw Error("Daemon unavailable");
+    };
+    await assert.rejects(
+      f.runtime.status(f.owner, job.id),
+      /Daemon unavailable/,
+    );
+    f.runtime.inspect = async () => ({ Running: true, Paused: false });
+    f.runtime.docker = async () => {
+      throw Error("Pause failed");
+    };
+    await assert.rejects(
+      f.runtime.control(f.owner, job.id, "pause"),
+      /Pause failed/,
+    );
+    f.runtime.docker = async () => {};
+    assert.equal(
+      (await f.runtime.control(f.owner, job.id, "pause")).state,
+      "paused",
+    );
+  } finally {
+    await f.pool.end();
   }
 });
