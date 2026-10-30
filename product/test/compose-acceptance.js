@@ -14,7 +14,6 @@ import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { chromium } from "@playwright/test";
 import Sqlite from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -57,7 +56,6 @@ writeFileSync(
 const compose = (args, options = {}) =>
   docker(["compose", "--env-file", envFile, "-p", project, ...args], options);
 const clients = [];
-let browser, page;
 const checks = [];
 let restorationStarted = false;
 let incompatibleStarted = false;
@@ -120,99 +118,80 @@ async function connect(raw, name) {
   return c;
 }
 try {
-  console.log(
-    "Building the real local Compose stack. Build output: /tmp/coordination-release-build.log",
-  );
-  const fd = openSync("/tmp/coordination-release-build.log", "w");
-  try {
-    const args = ["build", "-t", "coordination-product"];
-    const ca = process.env.BUILD_CA_FILE || process.env.CODEX_PROXY_CERT;
-    if (ca) args.push("--secret", "id=proxy_ca,src=" + ca);
-    args.push(".");
-    docker(args, { stdio: ["ignore", fd, fd] });
-  } finally {
-    closeSync(fd);
-  }
+  if (process.env.SKIP_ACCEPTANCE_BUILD !== "true") {
+    console.log(
+      "Building the real local Compose stack. Build output: /tmp/coordination-release-build.log",
+    );
+    const fd = openSync("/tmp/coordination-release-build.log", "w");
+    try {
+      const args = ["build", "-t", "coordination-product"];
+      const ca = process.env.BUILD_CA_FILE || process.env.CODEX_PROXY_CERT;
+      if (ca) args.push("--secret", "id=proxy_ca,src=" + ca);
+      args.push(".");
+      docker(args, { stdio: ["ignore", fd, fd] });
+    } finally {
+      closeSync(fd);
+    }
+  } else
+    console.log(
+      "Using explicitly prebuilt image " +
+        docker([
+          "image",
+          "inspect",
+          "coordination-product",
+          "--format",
+          "{{.Id}}",
+        ])
+          .toString()
+          .trim(),
+    );
   compose(["up", "--no-build", "--wait"], { stdio: "pipe" });
   await ready(base);
   report(
     "Docker image and isolated Compose PostgreSQL/API stack are healthy on loopback",
   );
-  browser = await chromium.launch({
-    executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
-    headless: true,
-    args: ["--no-sandbox"],
+  const bootstrapResponse = await fetch(base + "/api/v1/auth/bootstrap", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      secret: bootstrap,
+      username: "operator",
+      password: ownerPassword,
+    }),
   });
-  const context = await browser.newContext({ acceptDownloads: true });
-  page = await context.newPage();
-  await page.goto(base);
-  await page.getByLabel("One-time bootstrap secret").fill(bootstrap);
-  await page.getByLabel("Username", { exact: true }).fill("operator");
-  await page.getByLabel("Password", { exact: true }).fill(ownerPassword);
-  await page
-    .getByRole("button", { name: "Create owner account", exact: true })
-    .click();
-  await page
-    .getByRole("heading", { name: "Keep work moving.", exact: true })
-    .waitFor();
-  await page
-    .locator(".connection")
-    .filter({ hasText: "Live" })
-    .waitFor({ timeout: 10000 });
-  cookie = (await context.cookies())
-    .map((c) => c.name + "=" + c.value)
-    .join("; ");
-  csrf = (await ownerApi("auth/me")).csrf;
-  async function createUI(section, fields) {
-    await page.getByRole("button", { name: section, exact: true }).click();
-    await page.getByRole("button", { name: "+ Create", exact: true }).click();
-    const form = page.locator(".overlay").last().locator("form");
-    for (const [key, value] of Object.entries(fields)) {
-      const field = form.getByLabel(key, { exact: true });
-      if (await field.evaluate((e) => e.tagName === "SELECT"))
-        await field.selectOption(value);
-      else await field.fill(String(value));
-    }
-    return form;
-  }
-  let form = await createUI("Projects", {
+  assert.equal(bootstrapResponse.status, 201);
+  const login = await fetch(base + "/api/v1/auth/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "operator", password: ownerPassword }),
+  });
+  assert.equal(login.status, 200);
+  cookie = login.headers.get("set-cookie").split(";")[0];
+  csrf = (await login.json()).csrf;
+  assert.equal((await (await fetch(base)).json()).frontend, false);
+  const p = await ownerApi("actions/project_create", {
     name: "Acceptance ride-hailing",
-    description: "Mobile and Go backend sample",
+    description: "Two independent repositories",
   });
-  await form.getByRole("button", { name: "Save", exact: true }).click();
-  await page
-    .getByRole("heading", { name: "Acceptance ride-hailing", exact: true })
-    .waitFor();
-  const p = (await all("projects")).find(
-    (p) => p.name === "Acceptance ride-hailing",
-  );
-  for (const name of ["Mobile", "Go backend"]) {
-    form = await createUI("Repositories", {
-      "project id": p.id,
-      name,
-      reference: "/sample/" + name,
-      "default branch": "main",
+  const a = await ownerApi("actions/repo_create", {
+      project_id: p.id,
+      name: "Mobile",
+      reference: "/sample/mobile",
+    }),
+    b = await ownerApi("actions/repo_create", {
+      project_id: p.id,
+      name: "Go backend",
+      reference: "/sample/backend",
     });
-    await form.getByRole("button", { name: "Save", exact: true }).click();
-    await page.getByRole("heading", { name, exact: true }).waitFor();
-  }
-  const repos = await all("repositories"),
-    a = repos.find((r) => r.name === "Mobile"),
-    b = repos.find((r) => r.name === "Go backend");
   report(
-    "Owner bootstrapped and created project plus both repositories through the browser",
+    "Headless operator API bootstraps and creates a project with two repositories; no frontend is served",
   );
   async function enroll(name, repo) {
-    const f = await createUI("Agents", { name, "repo id": repo.id });
-    for (const permission of permissions)
-      await f.getByLabel(permission, { exact: true }).check();
-    await f.getByRole("button", { name: "Save", exact: true }).click();
-    await page
-      .getByRole("heading", { name: "Save this agent token", exact: true })
-      .waitFor();
-    const raw = await page.locator(".secret").textContent();
-    await page.getByRole("button", { name: "I saved it", exact: true }).click();
-    return { raw, agent: (await all("agents")).find((a) => a.name === name) };
+    const record = await ownerApi("actions/agent_enroll", {
+      name,
+      grants: [{ repo_id: repo.id, permissions }],
+    });
+    return { raw: record.token, agent: record.agent };
   }
   const aa = await enroll("Mobile agent", a),
     bb = await enroll("Backend agent", b),
@@ -230,20 +209,14 @@ try {
   report(
     "Separately enrolled MCP agents connect with hash-only credentials and isolated repository scopes",
   );
-  form = await createUI("Tasks", {
-    "repo id": a.id,
+  const setup = await ca.callTool({ name: "agent_setup", arguments: {} });
+  assert.equal(setup.structuredContent.result.repo_id, a.id);
+  let task = await call(ca, "task_create", {
+    repo_id: a.id,
     title: "Implement mobile login",
     description: "Use the backend login contract",
-    priority: "3",
-    assignee: aa.agent.id,
+    priority: 3,
   });
-  await form.getByRole("button", { name: "Save", exact: true }).click();
-  await page
-    .getByRole("heading", { name: "Implement mobile login", exact: true })
-    .waitFor();
-  let task = (await all("tasks")).find(
-    (t) => t.title === "Implement mobile login",
-  );
   task = await call(ca, "task_claim", { id: task.id });
   task = await call(ca, "task_update", {
     id: task.id,
@@ -251,11 +224,9 @@ try {
     progress: 40,
     comment: "Waiting for precise login contract",
   });
-  await page
-    .getByText("Progress 40%", { exact: true })
-    .waitFor({ timeout: 10000 });
+  assert.equal((await all("tasks")).find((t) => t.id === task.id).progress, 40);
   report(
-    "Assigned task claim/progress and agent comments appear live in the panel",
+    "MCP agents set up their scoped repo and create, claim, update and comment on tasks",
   );
   const q = await call(ca, "request_create", {
     repo_id: a.id,
@@ -276,20 +247,11 @@ try {
     },
   });
   assert.equal(denied.isError, true);
-  await page
-    .getByRole("button", { name: "Cross-repo inbox", exact: true })
-    .click();
-  await page.getByRole("heading", { name: q.scope, exact: true }).waitFor();
-  await page.getByRole("button", { name: "View details", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Approve / deny", exact: true })
-    .click();
-  form = page.locator(".overlay").last().locator("form");
-  await form.getByLabel("decision", { exact: true }).selectOption("approved");
-  await form
-    .getByLabel("reason", { exact: true })
-    .fill("Only the named login contract is approved");
-  await form.getByRole("button", { name: "Save", exact: true }).click();
+  await call(cb, "request_decide", {
+    id: q.id,
+    decision: "approved",
+    reason: "Only the named login contract is approved",
+  });
   await call(cb, "request_answer", {
     id: q.id,
     content:
@@ -306,7 +268,7 @@ try {
     ),
   );
   report(
-    "Scoped request is approved in the panel, answered by Backend MCP, and delivered only to its requester",
+    "Scoped request is approved and answered through Backend MCP and delivered only to its requester",
   );
   const typedContract = JSON.stringify({
     properties: { password: { type: "string", minLength: 12 } },
@@ -415,23 +377,11 @@ try {
     version: task.version,
     state: "review",
   });
-  await page.getByRole("button", { name: "Tasks", exact: true }).click();
-  await page
-    .locator(".resource-card")
-    .filter({ hasText: "Implement mobile login" })
-    .getByRole("button", { name: "View details", exact: true })
-    .click();
-  await page.getByRole("button", { name: "Update task", exact: true }).click();
-  form = page.locator(".overlay").last().locator("form");
-  assert.equal(
-    await form.getByLabel("priority", { exact: true }).inputValue(),
-    "3",
-  );
-  await form.getByLabel("state", { exact: true }).selectOption("done");
-  await form.getByRole("button", { name: "Save", exact: true }).click();
-  await page
-    .getByRole("heading", { name: "task update", exact: true })
-    .waitFor({ state: "hidden" });
+  await ownerApi("actions/task_update", {
+    id: task.id,
+    version: task.version,
+    state: "done",
+  });
   task = (await all("tasks")).find((t) => t.id === task.id);
   assert.equal(task.priority, 3);
   assert.equal(
@@ -468,41 +418,23 @@ try {
   const sourceHash = createHash("sha256")
     .update(readFileSync(source))
     .digest("hex");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Discover databases", exact: true })
-    .click();
-  await page
-    .getByLabel("Source database", { exact: true })
-    .selectOption("sample.sqlite");
-  await page
-    .getByLabel("Stable source label", { exact: true })
-    .fill("acceptance-source");
-  await page
-    .getByRole("button", { name: "Create backup & inspect", exact: true })
-    .click();
-  await page
-    .getByRole("heading", {
-      name: "Backup created · acceptance-source",
-      exact: true,
-    })
-    .waitFor();
-  await page
-    .getByLabel("Destination for default_repo", { exact: true })
-    .selectOption(a.id);
-  await page
-    .getByRole("button", { name: "Review mapping", exact: true })
-    .click();
-  await page
-    .getByRole("button", {
-      name: "Confirm import into selected repositories",
-      exact: true,
-    })
-    .click();
-  await page.getByText(/Records were committed successfully/).waitFor();
-  const plan = (await all("import_plans")).find(
-    (p) => p.source_id === "acceptance-source",
+  assert.ok(
+    (await ownerApi("imports/discover")).items.some(
+      (x) => x.path === "sample.sqlite",
+    ),
   );
+  const plan = await ownerApi("imports/inspect", {
+    source: "sample.sqlite",
+    source_id: "acceptance-source",
+  });
+  const reviewed = await ownerApi("imports/" + plan.id + "/review", {
+    default_repo: a.id,
+  });
+  plan.review_version = reviewed.review_version;
+  await ownerApi("imports/" + plan.id + "/apply", {
+    confirm: true,
+    review_version: plan.review_version,
+  });
   const replay = await ownerApi("imports/" + plan.id + "/apply", {
     confirm: true,
     review_version: plan.review_version,
@@ -522,17 +454,13 @@ try {
     "done",
   );
   report(
-    "Browser SQLite backup/inspection/review/import preserves source data, keeps identities revoked and is idempotent",
+    "Headless SQLite backup/inspection/review/import preserves source data, keeps identities revoked and is idempotent",
   );
   const before = (await all("tasks")).length;
   compose(["restart"], { stdio: "pipe" });
   await ready(base);
   assert.equal((await all("tasks")).length, before);
   assert.equal((await all("cross_repo_responses")).length, 1);
-  await page.reload();
-  await page
-    .getByRole("heading", { name: "Keep work moving.", exact: true })
-    .waitFor();
   report(
     "API and PostgreSQL restart retain owner session, tasks, answers and grants",
   );
@@ -725,55 +653,27 @@ try {
   report(
     "Revoked and expired credentials are rejected by the deployed MCP endpoint",
   );
-  await page.getByRole("button", { name: "Activity", exact: true }).click();
-  await page.getByPlaceholder("Search activity").fill("agent_auth_denied");
-  await page.getByText("agent auth denied", { exact: true }).first().waitFor();
-  await page.getByPlaceholder("Search activity").fill("request_answer");
-  await page.getByText("request answer", { exact: true }).waitFor();
-  await page.getByText("Imported historical records", { exact: true }).click();
-  await page
-    .getByRole("button", { name: "Load historical records", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Inspect historical record", exact: true })
-    .click();
-  await page
-    .locator(".dialog > pre")
-    .filter({ hasText: "Archived coordination agreement" })
-    .waitFor();
-  await page
-    .getByRole("button", { name: "Close details", exact: true })
-    .click();
-  const download = page.waitForEvent("download");
-  await page
-    .getByRole("button", { name: "Export events", exact: true })
-    .click();
-  const output = await download;
-  await output.saveAs(path.join(temporary, "audit.json"));
-  const audit = readFileSync(path.join(temporary, "audit.json"), "utf8");
-  assert.ok(JSON.parse(audit).some((e) => e.action === "agent_auth_denied"));
-  assert.ok(JSON.parse(audit).some((e) => e.action === "agent_authenticated"));
-  assert.ok(!audit.includes(aa.raw) && !audit.includes(bb.raw));
-  await page.waitForFunction(() => !document.querySelector('[role="alert"]'));
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.screenshot({
-    path: "/tmp/coordination-product-desktop.png",
-    fullPage: true,
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Tasks", exact: true }).click();
-  assert.equal(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-    true,
+  const audit = [];
+  let after = 0;
+  for (;;) {
+    const rows = await ownerApi("audit?after=" + after);
+    audit.push(...rows);
+    if (rows.length < 100) break;
+    after = Number(rows.at(-1).id);
+  }
+  assert.ok(audit.some((e) => e.action === "agent_auth_denied"));
+  assert.ok(audit.some((e) => e.action === "agent_authenticated"));
+  assert.ok(
+    !JSON.stringify(audit).includes(aa.raw) &&
+      !JSON.stringify(audit).includes(bb.raw),
   );
-  await page.screenshot({
-    path: "/tmp/coordination-product-mobile.png",
-    fullPage: true,
-  });
+  assert.ok(
+    JSON.stringify((await ownerApi("resources/messages")).items).includes(
+      "Archived coordination agreement",
+    ),
+  );
   report(
-    "Responsive browser panel and exported audit show real agent events without raw credentials",
+    "Headless audit and historical-record APIs expose real events without raw credentials",
   );
   writeFileSync(
     "/tmp/coordination-release-report.json",
@@ -791,18 +691,6 @@ try {
   );
   console.log("ALL COMPOSE ACCEPTANCE CHECKS PASSED");
 } catch (error) {
-  if (page)
-    try {
-      await page.screenshot({
-        path: "/tmp/coordination-release-failure.png",
-        fullPage: true,
-      });
-      writeFileSync(
-        "/tmp/coordination-release-failure.html",
-        await page.content(),
-        { mode: 0o600 },
-      );
-    } catch {}
   writeFileSync(
     "/tmp/coordination-release-report.json",
     JSON.stringify({ passed: false, checks, error: String(error) }, null, 2),
@@ -816,7 +704,6 @@ try {
   throw error;
 } finally {
   await Promise.allSettled(clients.map((c) => c.close()));
-  await browser?.close();
   if (restorationStarted)
     try {
       docker(["rm", "-f", project + "-restore"]);

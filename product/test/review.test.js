@@ -188,7 +188,7 @@ test("SQL pages remain bounded and authorized while an exclusive writer is waiti
   }
 });
 
-test("operator frontend and bootstrap are restored; anonymous or invalid MCP credentials never fall back to a claimed identity", async () => {
+test("headless service requires protected setup and never falls back to a claimed identity", async () => {
   const pool = await database(process.env.TEST_DATABASE_URL),
     secret = "restore-frontend-fixture-bootstrap-secret";
   let server;
@@ -200,8 +200,13 @@ test("operator frontend and bootstrap are restored; anonymous or invalid MCP cre
     server = await app({ pool, bootstrapSecret: secret, runtimeConfig: null });
     const page = await server.inject({ method: "GET", url: "/" });
     assert.equal(page.statusCode, 200);
-    assert.match(page.headers["content-type"], /text\/html/);
-    assert.match(page.body, /<script[^>]+type="module"/);
+    assert.match(page.headers["content-type"], /application\/json/);
+    assert.equal(page.json().frontend, false);
+    assert.equal(
+      (await server.inject({ method: "GET", url: "/assets/old-ui.js" }))
+        .statusCode,
+      404,
+    );
     for (const submitted of [undefined, "wrong-bootstrap-secret"]) {
       const result = await server.inject({
         method: "POST",
@@ -276,7 +281,7 @@ test("stdio bridge requires an enrolled agent token before opening a remote conn
       { env, timeout: 10000 },
     ),
     (error) => {
-      assert.match(error.stderr, /COORDINATION_AGENT_TOKEN required/);
+      assert.match(error.stderr, /COORDINATION_AGENT_TOKEN.*required/);
       assert.doesNotMatch(error.stderr, /ECONNREFUSED/);
       return true;
     },

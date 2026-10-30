@@ -1,9 +1,7 @@
 import Fastify from "fastify";
-import fastifyStatic from "@fastify/static";
 import { hash as passwordHash, verify } from "@node-rs/argon2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { database, transaction, SCHEMA_VERSION } from "./db.js";
@@ -438,15 +436,14 @@ export async function app({
     });
     await transport.handleRequest(req.raw, reply.raw, req.body);
   });
-  const dist = fileURLToPath(new URL("../dist/", import.meta.url));
-  if (existsSync(dist)) {
-    await server.register(fastifyStatic, { root: dist });
-    server.setNotFoundHandler((req, reply) =>
-      req.url.startsWith("/api")
-        ? reply.code(404).send({ error: { message: "Not found" } })
-        : reply.sendFile("index.html"),
-    );
-  }
+  server.get("/", async () => ({
+    service: "agent-coordination",
+    transport: "streamable-http",
+    mcp_endpoint: "/mcp",
+    setup:
+      "npm run setup:operator --prefix product -- --config /absolute/private/operator.json",
+    frontend: false,
+  }));
   return server;
 }
 if (

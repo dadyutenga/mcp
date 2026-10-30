@@ -1,5 +1,5 @@
 import pg from "pg";
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 export const tables = [
   "projects",
   "repositories",
@@ -154,6 +154,11 @@ export async function database(url) {
         CREATE UNIQUE INDEX active_runtime_task ON runtime_jobs(task_id) WHERE body->>'state' IN ('preparing','running','paused');
         ALTER TABLE runtime_jobs ADD CONSTRAINT runtime_state CHECK(body->>'state' IN ('preparing','running','paused','exited','cancelled','failed'));
         INSERT INTO schema_migrations(version) VALUES(9)`);
+    }
+    if (Number(rows[0].v) < 10) {
+      await c.query(`ALTER TABLE agent_repo_grants DROP CONSTRAINT grant_permissions;
+      ALTER TABLE agent_repo_grants ADD CONSTRAINT grant_permissions CHECK(jsonb_typeof(body->'permissions')='array' AND body->'permissions' <@ '["task:read","task:create","task:claim","task:update","task:comment","reservation:acquire","reservation:release","context:read","context:publish","cross_repo:request","cross_repo:approve"]'::jsonb);
+      INSERT INTO schema_migrations(version) VALUES(10)`);
     }
     await c.query("COMMIT");
   } catch (e) {

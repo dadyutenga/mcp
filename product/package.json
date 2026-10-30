@@ -6,30 +6,24 @@
   "scripts": {
     "start": "node src/server.js",
     "start:local": "node --env-file=.env src/server.js",
-    "build": "tsc --noEmit && vite build",
-    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "import": "node src/import.js",
     "test:compose": "node test/compose-acceptance.js",
-    "diagnostics": "node src/operations.js diagnostics"
+    "diagnostics": "node src/operations.js diagnostics",
+    "setup:agent": "node src/setup.js",
+    "setup:operator": "node src/operator-setup.js"
   },
   "dependencies": {
-    "@fastify/static": "^10.1.8",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@node-rs/argon2": "^2.0.2",
     "better-sqlite3": "13.0.3",
     "fastify": "^5.6.2",
     "pg": "^8.16.3",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
     "@types/node": "^24.10.0",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.0"
+    "typescript": "^5.9.3"
   }
 }

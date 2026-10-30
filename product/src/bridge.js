@@ -6,16 +6,11 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-const url = new URL(
+import { agentToken, endpoint } from "./credentials.js";
+const url = endpoint(
   process.env.COORDINATION_URL || "http://127.0.0.1:4310/mcp",
 );
-if (
-  !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
-  url.protocol !== "https:"
-)
-  throw Error("Remote MCP requires HTTPS");
-if (!process.env.COORDINATION_AGENT_TOKEN)
-  throw Error("COORDINATION_AGENT_TOKEN required");
+const credential = await agentToken();
 const remote = new Client({
   name: "coordination-stdio-bridge",
   version: "0.1.0",
@@ -24,11 +19,18 @@ await remote.connect(
   new StreamableHTTPClientTransport(url, {
     requestInit: {
       headers: {
-        Authorization: `Bearer ${process.env.COORDINATION_AGENT_TOKEN}`,
+        Authorization: `Bearer ${credential}`,
       },
     },
   }),
 );
+if (process.env.COORDINATION_REPO_ID) {
+  const result = await remote.callTool({
+    name: "agent_setup",
+    arguments: { repo_id: process.env.COORDINATION_REPO_ID },
+  });
+  if (result.isError) throw Error("Agent repository setup is not authorized");
+}
 const local = new Server(
   { name: "coordination-platform", version: "0.1.0" },
   { capabilities: { tools: {} } },

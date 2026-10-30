@@ -20,7 +20,6 @@ import { DockerRuntime } from "../src/runtime.js";
 import { dockerConnection } from "../src/docker.js";
 import { app } from "../src/server.js";
 import { hash as passwordHash } from "@node-rs/argon2";
-import { chromium } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -44,7 +43,7 @@ test(
       });
     const git = (args) =>
       execFileSync("git", ["-C", source, ...args], { encoding: "utf8" });
-    let job, runtime, server, browser, client;
+    let job, runtime, server, client;
     const jobs = [];
     try {
       writeFileSync(path.join(source, "contract.txt"), "original\n");
@@ -136,31 +135,37 @@ test(
       });
       await server.listen({ host: "127.0.0.1", port: 0 });
       const base = "http://127.0.0.1:" + server.server.address().port;
-      browser = await chromium.launch({
-        executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
-        args: ["--no-sandbox"],
+      const login = await server.inject({
+        method: "POST",
+        url: "/api/v1/auth/session",
+        payload: { username, password },
       });
-      const page = await browser.newPage();
-      await page.goto(base);
-      await page.getByLabel("Username").fill(username);
-      await page.getByLabel("Password", { exact: true }).fill(password);
-      await page.getByRole("button", { name: "Sign in", exact: true }).click();
-      await page
-        .getByRole("heading", { name: "Keep work moving.", exact: true })
-        .waitFor();
-      await page
-        .getByRole("button", { name: "Managed jobs", exact: true })
-        .click();
-      await page.getByRole("button", { name: "+ Create", exact: true }).click();
-      await page.getByLabel("task id", { exact: true }).fill(task.id);
-      await page.getByLabel("profile", { exact: true }).selectOption("fixture");
-      const started = page.waitForResponse(
-        (r) =>
-          r.url().endsWith("/api/v1/runtime/start") &&
-          r.request().method() === "POST",
-      );
-      await page.getByRole("button", { name: "Save", exact: true }).click();
-      job = await (await started).json();
+      const cookie = login.headers["set-cookie"].split(";")[0],
+        csrf = login.json().csrf;
+      async function ownerCall(route, input) {
+        for (let retry = 0; retry < 20; retry++) {
+          const r = await server.inject({
+            method: input ? "POST" : "GET",
+            url: "/api/v1/" + route,
+            headers: { cookie, "x-csrf-token": csrf },
+            payload: input,
+          });
+          if (
+            r.statusCode === 409 &&
+            r.json().error.message.includes("operation is in progress")
+          ) {
+            await wait(100);
+            continue;
+          }
+          assert.ok(r.statusCode < 300, r.body);
+          return r.json();
+        }
+        throw Error("Runtime control stayed busy");
+      }
+      job = await ownerCall("runtime/start", {
+        task_id: task.id,
+        profile: "fixture",
+      });
       jobs.push(job);
       assert.equal(job.state, "running");
       await assert.rejects(
@@ -187,18 +192,10 @@ test(
         ]),
         /live reservation/,
       );
-      await page
-        .locator(".resource-card")
-        .filter({
-          has: page.getByRole("heading", {
-            name: job.title || job.id,
-            exact: true,
-          }),
-        })
-        .getByRole("button", { name: "View details", exact: true })
-        .click();
-      await page.getByRole("button", { name: "pause", exact: true }).click();
-      await page.getByText(/^State: paused/).waitFor();
+      assert.equal(
+        (await ownerCall("runtime/" + job.id + "/pause", {})).state,
+        "paused",
+      );
       assert.equal(
         JSON.parse(
           docker([
@@ -213,8 +210,10 @@ test(
       // Persisted jobs remain controllable by a newly created service/adapter instance.
       const restarted = new DockerRuntime(pool, new Service(pool), config);
       assert.equal((await restarted.status(owner, job.id)).state, "paused");
-      await page.getByRole("button", { name: "resume", exact: true }).click();
-      await page.getByText(/^State: running/).waitFor();
+      assert.equal(
+        (await ownerCall("runtime/" + job.id + "/resume", {})).state,
+        "running",
+      );
       assert.equal((await restarted.status(owner, job.id)).state, "running");
       client = new Client({ name: "managed-runtime-fixture", version: "1" });
       await client.connect(
@@ -398,7 +397,6 @@ test(
     } finally {
       if (job) await runtime.control(owner, job.id, "cancel").catch(() => {});
       await client?.close();
-      await browser?.close();
       await server?.close();
       for (const entry of jobs)
         try {

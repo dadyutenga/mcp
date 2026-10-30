@@ -27,6 +27,31 @@ export function mcp(service, principal) {
         }
       },
     );
+  tool("agent_setup", z.object({ repo_id: z.uuid().optional() }), (x) =>
+    service.setup(principal, x),
+  );
+  tool(
+    "agent_list",
+    z.object({
+      repo_id: z.uuid().optional(),
+      after: z.uuid().optional(),
+      limit: z.number().int().min(1).max(50).default(50),
+    }),
+    (x) => service.peers(principal, x),
+  );
+  tool(
+    "state_snapshot",
+    z.object({ repo_id: z.uuid().optional() }),
+    async (x) => ({
+      identity: await service.identity(principal),
+      peers: await service.peers(principal, { ...x, limit: 10 }),
+      tasks: await service.read(principal, "tasks", { ...x, limit: 10 }),
+      reservations: await service.read(principal, "file_reservations", {
+        ...x,
+        limit: 10,
+      }),
+    }),
+  );
   tool("identity_get", z.object({}), () => service.identity(principal));
   tool(
     "events_poll",
@@ -64,6 +89,7 @@ export function mcp(service, principal) {
       service.resource(principal, name, x.id),
     );
   for (const name of [
+    "task_create",
     "task_claim",
     "task_update",
     "task_comment",
