@@ -627,6 +627,17 @@ function App() {
         <h1>{setup ? "Your control plane starts here." : "Welcome back."}</h1>
         <p>One place for your repositories, agents, and shared work.</p>
         <form onSubmit={signin}>
+          {setup && (
+            <label>
+              One-time bootstrap secret
+              <input
+                name="secret"
+                type="password"
+                required
+                autoComplete="off"
+              />
+            </label>
+          )}
           <label>
             Username
             <input name="username" required autoComplete="username" />
