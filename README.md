@@ -137,6 +137,6 @@ approval-gated cross-repo requests, advisory reservations, audit history, live S
 and authenticated HTTP/stdio MCP access. Existing local MCP mode is unchanged.
 
 See the [product runbook](product/README.md) for Compose startup, agent connection,
-backup/restore, legacy import, verification commands, and the explicit remaining
-release requirements. This implementation is not yet a complete release against
-all scenarios in the full product build specification.
+backup/restore, legacy import, verification commands and the supported local operating boundary. The release
+includes a real Compose/browser/MCP acceptance harness, reviewed multi-repo import,
+backup/restore verification, and explicit unsupported runtime capabilities.

@@ -1,5 +1,6 @@
 services:
   db:
+    restart: unless-stopped
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: coordination
@@ -13,20 +14,33 @@ services:
       timeout: 3s
       retries: 20
   app:
+    restart: unless-stopped
     image: coordination-product
     build: .
     ports:
-      - 127.0.0.1:4310:4310
+      - 127.0.0.1:${COORDINATION_PORT:-4310}:4310
     environment:
       DATABASE_URL: postgres://coordination:${POSTGRES_PASSWORD}@db:5432/coordination
+      LEGACY_IMPORT_ROOT: /imports
+      BACKUP_DIR: /data/backups
       BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:?Set a random BOOTSTRAP_SECRET}
+    volumes:
+      - ${LEGACY_IMPORT_ROOT:-/tmp/coordination-legacy-imports}:/imports:ro
+      - coordination-backups:/data/backups
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:4310/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:4310/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
 volumes:
   coordination-data:
+  coordination-backups:
