@@ -332,6 +332,7 @@ export class Service {
       request_id,
       agent_id,
       full = false,
+      incoming = false,
     } = {},
   ) {
     if (after) z.uuid().parse(after);
@@ -382,7 +383,23 @@ export class Service {
         const filters = [];
         if (after) filters.push(`r.id>${bind(after)}::uuid`);
         if (id) filters.push(`r.id=${bind(id)}::uuid`);
-        if (repo_id) filters.push(`r.repo_id=${bind(repo_id)}::uuid`);
+        if (repo_id) {
+          const scope = bind(repo_id);
+          if (kind === "cross_repo_requests")
+            filters.push(
+              `(r.repo_id=${scope}::uuid OR r.target_repo_id=${scope}::uuid)`,
+            );
+          else if (kind === "cross_repo_responses")
+            filters.push(
+              `EXISTS(SELECT 1 FROM cross_repo_requests q WHERE q.id=r.request_id AND (q.repo_id=${scope}::uuid OR q.target_repo_id=${scope}::uuid))`,
+            );
+          else filters.push(`r.repo_id=${scope}::uuid`);
+        }
+        if (incoming && kind === "cross_repo_requests") {
+          filters.push(
+            "r.body->>'state' IN ('pending','approved','needs-input') AND (r.body->>'expires_at')::timestamptz>now()",
+          );
+        }
         if (task_id) filters.push(`r.body->>'task_id'=${bind(task_id)}`);
         if (request_id)
           filters.push(`r.body->>'request_id'=${bind(request_id)}`);
@@ -418,7 +435,11 @@ export class Service {
               `EXISTS(SELECT 1 FROM agent_repo_grants g WHERE ${effective} AND g.repo_id=r.id)`,
             );
           else if (kind === "cross_repo_requests")
-            filters.push(requestAccess("r"));
+            filters.push(
+              incoming
+                ? grant("r.target_repo_id", "cross_repo:approve")
+                : requestAccess("r"),
+            );
           else if (kind === "cross_repo_responses")
             filters.push(
               `EXISTS(SELECT 1 FROM cross_repo_requests q WHERE q.id=r.request_id AND ${requestAccess("q")})`,
@@ -718,16 +739,13 @@ export class Service {
             project_id: repo.project_id,
             name: repo.name,
             reference: repo.reference,
-            agents: agents
-              .slice(0, 10)
-              .map((a) => ({
-                ...a,
-                state:
-                  a.last_active &&
-                  Date.parse(a.last_active) > Date.now() - 900000
-                    ? "online"
-                    : "stale",
-              })),
+            agents: agents.slice(0, 10).map((a) => ({
+              ...a,
+              state:
+                a.last_active && Date.parse(a.last_active) > Date.now() - 900000
+                  ? "online"
+                  : "stale",
+            })),
             more_agents: agents.length > 10,
           };
           const size = Buffer.byteLength(JSON.stringify(item));
@@ -737,6 +755,8 @@ export class Service {
         }
         return {
           items,
+          presence_explanation:
+            "Online means a recent MCP connection heartbeat; it does not mean the agent has read or answered a request.",
           has_more: rows.length > items.length,
           next_cursor: items.at(-1)?.repo_id || after,
         };
@@ -812,6 +832,8 @@ export class Service {
           )
         ).rows;
         return {
+          presence_explanation:
+            "Online means a recent MCP connection heartbeat; it does not confirm that the agent is reading requests.",
           items: rows.slice(0, limit).map((r) => ({
             ...r,
             state:
@@ -829,6 +851,9 @@ export class Service {
   async resource(p, kind, id) {
     const result = await this.read(p, kind, { id, full: true, limit: 1 });
     return result.items[0] || fail(404, "Unknown or unauthorized resource");
+  }
+  async inbox(p, options = {}) {
+    return this.read(p, "cross_repo_requests", { ...options, incoming: true });
   }
   async notifications(p, after = 0, { before, latest = false } = {}) {
     if (!p.owner) fail(403, "Owner only");
@@ -901,7 +926,12 @@ export class Service {
             `SELECT * FROM audit_events a WHERE id>$1 AND ((recipient_agent_id IS NULL AND
               (actor=$2 OR repo_id=ANY($3) OR (action IN ('workspace_registered','workspace_agent_registered')
                 AND EXISTS(SELECT 1 FROM repositories r WHERE r.id::text=a.repo_id AND r.project_id=ANY($5::uuid[])))))
-              OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))) ORDER BY id LIMIT 100`,
+              OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))
+              OR (recipient_agent_id IS NULL AND action IN ('request_create','request_clarify','request_decide')
+                AND EXISTS(SELECT 1 FROM cross_repo_requests q JOIN agent_repo_grants g ON g.repo_id=q.target_repo_id
+                  WHERE q.id::text=a.resource_id AND g.agent_id=$2::uuid AND g.body->'permissions' ? 'cross_repo:approve'
+                    AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now())
+                    AND (q.body->>'expires_at')::timestamptz>now()))) ORDER BY id LIMIT 100`,
             [
               after,
               p.id,

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.2 — 2026-10-31
+
+All registered repositories now stay active together, and incoming collaboration
+requests reach their target repository's delegates.
+
+- Remove the single-active-repository requirement. Aggregate reads, identities,
+  snapshots, inboxes and events across registered roots with bounded pages.
+- Route existing task, reservation and request operations by resource ID. Approvals
+  and answers use the target repository; new writes require an explicit repo ID.
+- Deliver request creation, clarification and decision events to authorized target
+  delegates, including existing requests. Preserve source/target permission checks.
+- Add `collaboration_inbox` and pending-request notices on ordinary bridge replies.
+- Explain that online presence is a connection heartbeat, not a read receipt or a
+  promise that an external agent will answer without using its MCP connection.
+- Retain native PostgreSQL setup, global client configs, credentials and history.
+
+Update with `git pull --ff-only`, restart the local service and reload Coordination
+in each client's MCP settings. No database reset or new migration is required.
+
 ## 1.5.1 — 2026-10-31
 
 The installer now connects directly to PostgreSQL and starts the Node service.

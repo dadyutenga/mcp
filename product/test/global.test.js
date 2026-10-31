@@ -279,19 +279,21 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         await client.sendRootsListChanged();
         const second = await call("workspace_status");
         assert.equal(second.workspaces.length, 2);
-        assert.equal(second.active_repo_id, null);
+        assert.deepEqual(
+          new Set(second.active_repo_ids),
+          new Set(second.workspaces.map((w) => w.repo_id)),
+        );
         const ambiguous = await client.callTool({
           name: "identity_get",
           arguments: {},
         });
-        assert.equal(ambiguous.isError, true);
-        await call("workspace_select", {
-          repo_id: first.workspaces[0].repo_id,
-        });
-        assert.equal(
-          (await call("identity_get")).agent_id,
-          first.workspaces[0].agent_id,
+        assert.notEqual(
+          ambiguous.isError,
+          true,
+          "Both registered repositories must work without workspace_select",
         );
+        assert.equal(ambiguous.structuredContent.result.identities.length, 2);
+        assert.equal((await call("identity_get")).identities.length, 2);
         const task = await call("task_create", {
           input: {
             repo_id: registered.b.repo_id,
@@ -304,11 +306,82 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
           second.workspaces.find((s) => s.repo_id === registered.b.repo_id)
             .agent_id,
         );
+        const claimed = await call("task_claim", { input: { id: task.id } });
+        const lease = await call("reservation_acquire", {
+          input: {
+            repo_id: registered.b.repo_id,
+            task_id: task.id,
+            path: "src/login.ts",
+          },
+        });
+        assert.equal(
+          (await call("reservation_release", { input: { id: lease.id } }))
+            .state,
+          "released",
+        );
+        await call("task_update", {
+          input: { id: task.id, version: claimed.version, progress: 20 },
+        });
+        assert.ok(
+          (await call("tasks_list")).items.some((t) => t.id === task.id),
+        );
+        assert.equal((await call("state_snapshot")).workspaces.length, 2);
+        const question = await call("request_create", {
+          input: {
+            repo_id: registered.b.repo_id,
+            target_repo: first.workspaces[0].repo_id,
+            type: "api-contract",
+            reason: "Need backend Google login role",
+            scope: "POST /auth/google driver role",
+          },
+        });
+        const inbox = await call("collaboration_inbox");
+        assert.ok(inbox.items.some((q) => q.id === question.id));
+        const notified = await client.callTool({
+          name: "workspace_status",
+          arguments: {},
+        });
+        assert.ok(
+          notified.structuredContent.pending_collaboration.requests.some(
+            (q) => q.id === question.id,
+          ),
+        );
+        await call("request_decide", {
+          input: {
+            id: question.id,
+            decision: "approved",
+            reason: "Precise login contract scope",
+          },
+        });
+        const answer = await call("request_answer", {
+          input: {
+            id: question.id,
+            content:
+              "The requested account role is documented in the auth contract.",
+          },
+        });
+        assert.equal(answer.responder, first.workspaces[0].agent_id);
+        assert.ok(
+          (
+            await call("cross_repo_responses_list", {
+              repo_id: registered.b.repo_id,
+            })
+          ).items.some((r) => r.request_id === question.id),
+        );
+        const events = await call("events_poll", { after: 0 });
+        assert.equal(events.length, new Set(events.map((e) => e.id)).size);
+        assert.ok(
+          events.some(
+            (e) =>
+              e.action === "cross_repo_answer_ready" &&
+              e.resource_id === question.id,
+          ),
+        );
         roots = [{ uri: pathToFileURL(repos[1]).href }];
         await client.sendRootsListChanged();
         const removed = await call("workspace_status");
         assert.equal(removed.workspaces.length, 1);
-        assert.equal(removed.active_repo_id, registered.b.repo_id);
+        assert.deepEqual(removed.active_repo_ids, [registered.b.repo_id]);
       },
     );
     await t.test(

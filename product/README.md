@@ -200,14 +200,18 @@ or read source files. Multiple clients opening the same path share the repositor
 record and have distinct worker identities. Existing records with equivalent
 Windows paths are reused. Existing repository-scoped connections still work.
 
-- `workspace_status` shows registrations, active repository and discovery errors.
+- `workspace_status` shows all registrations in `active_repo_ids` and discovery
+  errors. All registered repositories stay active together.
 - `workspace_register({path:"/absolute/repo"})` registers a repository explicitly
   when the editor does not supply roots. Without roots the bridge also tries its
   working directory; if that is not a Git repository, manual registration stays
   available. It never guesses a repository from the bridge script's location.
-- With multiple roots, use `workspace_select({repo_id})` before tools without a
-  repository argument. Calls containing `repo_id` or `input.repo_id` route to that
-  registered repository's identity. This avoids silently acting in another repo.
+- Reads and inboxes aggregate across registered roots. Calls containing `repo_id`
+  or `input.repo_id` route to that repository's identity. Existing task, request
+  and reservation IDs route to their owning worker automatically; request answers
+  and approvals use the target repository. New mutations require a repository ID.
+  Writes are never broadcast. `workspace_select` is an optional compatibility
+  default and never deactivates other registrations.
 - Root-change notifications register new repositories and close connections to
   removed repositories. Active connections refresh presence every 60 seconds;
   peers become stale after 15 minutes without activity.
@@ -217,11 +221,15 @@ Windows paths are reused. Existing repository-scoped connections still work.
 - `events_poll` includes registration events from repositories in the same
   authorized project, so peers can refresh the directory when another agent joins.
 - Use a discovered `repo_id` as `target_repo` in `request_create`; the target's
-  delegates see the request through `cross_repo_requests_list` and `events_poll`,
+  delegates see the request through `collaboration_inbox`, target-scoped
+  `cross_repo_requests_list` and `events_poll`,
   then use `request_decide` and `request_answer`. The requester reads the response
   through `cross_repo_responses_list`. Publish context to specific repositories
   with `context_publish`. MCP does not control or wake an external editor agent;
-  each active agent must poll/use its connection to receive work.
+  each agent must poll/use its connection to receive work. Pending inbox notices
+  accompany ordinary bridge tool replies. Check `collaboration_inbox` at startup
+  and before work. Online presence means a recent connection heartbeat, not a
+  confirmed read or response. Answered, revoked and expired requests leave the inbox.
 
 Remove recognized repository-local coordination entries when migrating an
 existing installation: a local entry can shadow the global one. Preserve unrelated

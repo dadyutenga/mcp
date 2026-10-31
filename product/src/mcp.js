@@ -81,6 +81,16 @@ export function mcp(service, principal) {
   );
   tool("identity_get", z.object({}), () => service.identity(principal));
   tool(
+    "collaboration_inbox",
+    z.object({
+      repo_id: z.uuid().optional(),
+      after: z.uuid().optional(),
+      limit: z.number().int().min(1).max(50).default(20),
+      full: z.boolean().default(false),
+    }),
+    (x) => service.inbox(principal, x),
+  );
+  tool(
     "events_poll",
     z.object({ after: z.number().int().nonnegative().default(0) }),
     (x) => service.events(principal, x.after),

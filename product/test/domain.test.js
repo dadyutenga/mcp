@@ -212,6 +212,90 @@ test("cross-repo answer notifications are delivered only to the requester, and e
   }
 });
 
+test("incoming request events reach a target-only delegate and target-scoped request lists", async () => {
+  const f = await fixture();
+  try {
+    const { s, owner, repo, pa } = f;
+    const target = await s.execute(owner, "repo_create", {
+      project_id: repo.project_id,
+      name: "Backend inbox",
+      reference: "fixture:backend-inbox",
+    });
+    const worker = await s.execute(owner, "agent_enroll", {
+      name: "Backend only",
+      grants: [
+        {
+          repo_id: target.id,
+          permissions: ["task:read", "cross_repo:approve"],
+        },
+      ],
+    });
+    const backend = await s.authenticate(worker.token);
+    const request = await s.execute(pa, "request_create", {
+      repo_id: repo.id,
+      target_repo: target.id,
+      type: "api-contract",
+      reason: "Google driver login",
+      scope: "POST /auth/google driver account role",
+    });
+    assert.ok(
+      (await s.events(backend)).some(
+        (e) => e.resource_id === request.id && e.action === "request_create",
+      ),
+      "Backend must receive an event for a request created by the driver repo",
+    );
+    assert.ok(
+      (
+        await s.read(backend, "cross_repo_requests", { repo_id: target.id })
+      ).items.some((q) => q.id === request.id),
+    );
+    assert.ok(
+      (await s.inbox(backend, { repo_id: target.id })).items.some(
+        (q) => q.id === request.id,
+      ),
+    );
+    assert.equal(
+      (await s.inbox(pa)).items.length,
+      0,
+      "Source requesters must not receive their own outgoing request as incoming",
+    );
+    const reader = await s.execute(owner, "agent_enroll", {
+      name: "Target reader without approval",
+      grants: [{ repo_id: target.id, permissions: ["task:read"] }],
+    });
+    const readOnly = await s.authenticate(reader.token);
+    assert.equal((await s.inbox(readOnly)).items.length, 0);
+    assert.ok(
+      !(await s.events(readOnly)).some((e) => e.resource_id === request.id),
+    );
+    await s.execute(pa, "request_clarify", {
+      id: request.id,
+      clarification: "Android driver package needs a driver-role response",
+    });
+    assert.ok(
+      (await s.events(backend)).some(
+        (e) => e.resource_id === request.id && e.action === "request_clarify",
+      ),
+    );
+    await s.execute(backend, "request_decide", {
+      id: request.id,
+      decision: "approved",
+      reason: "Exact endpoint contract",
+    });
+    await s.execute(backend, "request_answer", {
+      id: request.id,
+      content: "Fixture contract response",
+    });
+    assert.equal(
+      (await s.inbox(backend)).items.length,
+      0,
+      "Answered requests leave the actionable inbox",
+    );
+  } finally {
+    await f.pool.end();
+  }
+});
+
 test("request clarification, bounded reference scope and requester withdrawal retain an auditable decision trail", async () => {
   const f = await fixture();
   try {

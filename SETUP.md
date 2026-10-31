@@ -1,4 +1,4 @@
-# Install Coordination MCP v1.5.1
+# Install Coordination MCP v1.5.2
 
 Run setup yourself after installing the prerequisites below. Setup handles Node
 dependencies, service secrets, the first account and global MCP configuration.
@@ -27,12 +27,12 @@ setup connects directly through its Node driver.
 Use your existing checkout, or clone the release:
 
 ```sh
-git clone --branch v1.5.1 https://github.com/dadyutenga/mcp.git
+git clone --branch v1.5.2 https://github.com/dadyutenga/mcp.git
 cd mcp
 ```
 
-You can also download and extract `mcp-1.5.1.zip` from the
-[v1.5.1 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.1). Open a
+You can also download and extract `mcp-1.5.2.zip` from the
+[v1.5.2 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.2). Open a
 terminal in the extracted directory containing `setup.mjs`.
 
 ## 3. Run setup
@@ -118,9 +118,16 @@ If the client does not supply them, ask the agent to call:
 workspace_register({path: "D:/path/to/your/repository"})
 ```
 
-For a workspace with multiple repositories, use `workspace_select` with an ID
-from `workspace_status` before actions that do not include a repository ID.
-Agents receive collaboration requests when they use/poll their MCP connection.
+Every registered repository stays active together. No `workspace_select` is
+required. Reads cover all registered repositories; actions on existing tasks,
+reservations and requests route by their IDs. New tasks and requests include the
+source `repo_id` so the tool can use the correct repository identity.
+
+Ask agents to check `collaboration_inbox` at startup and before work. Pending
+incoming requests also appear as notices on ordinary tool replies, and target
+agents receive request events through `events_poll`. An **online** badge means a
+recent connection heartbeat; it does not confirm that the agent has read or
+answered a request. MCP cannot wake an idle external editor agent.
 
 Version and native client checks:
 
@@ -132,7 +139,12 @@ grok mcp list
 
 For Claude Code, use `/mcp` to inspect the connection. Run only the commands for
 clients installed on your computer. The local service also exposes JSON metadata
-at `http://127.0.0.1:4310/`; its version should be `1.5.1`.
+at `http://127.0.0.1:4310/`; its version should be `1.5.2`.
+
+To update an existing checkout, run `git pull --ff-only`. Restart the local Node
+service to load the new server code, then reload `coordination` in each client's
+MCP settings once to load the new bridge. Existing credentials and database
+history remain valid; no reinstall or database reset is required.
 
 ## Existing local PostgreSQL installation
 
