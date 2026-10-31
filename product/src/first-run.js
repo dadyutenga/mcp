@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { endpoint, privateFile } from "./credentials.js";
 import { gitWorkspace } from "./workspaces.js";
 import { provisionGlobal } from "./global-setup.js";
+import { selectedClients } from "./configuration.js";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const randomSecret = () => randomBytes(32).toString("hex");
@@ -212,13 +213,13 @@ export async function firstRun({
   );
   if (url.pathname !== "/mcp")
     throw Error("Use the service URL ending in /mcp");
-  const selected =
+  const selected = selectedClients(
     client ||
-    (
-      await prompt("Editor: cursor, antigravity, or both", "both")
-    ).toLowerCase();
-  if (!["cursor", "antigravity", "both"].includes(selected))
-    throw Error("Choose cursor, antigravity, or both");
+      (await prompt(
+        "Clients: cursor, antigravity, codex, claude, grok (comma-separated), or all",
+        "cursor",
+      )),
+  );
   const directory = path.join(
     home,
     ".config",
@@ -300,9 +301,7 @@ export async function firstRun({
       flag: "wx",
     });
   const results = [];
-  for (const editor of selected === "both"
-    ? ["cursor", "antigravity"]
-    : [selected]) {
+  for (const editor of selected) {
     log(`Connecting ${editor} globally...`);
     results.push(
       await provisionGlobal(

@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { VERSION } from "./version.js";
 import { hash as passwordHash, verify } from "@node-rs/argon2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -438,6 +439,7 @@ export async function app({
   });
   server.get("/", async () => ({
     service: "agent-coordination",
+    version: VERSION,
     transport: "streamable-http",
     mcp_endpoint: "/mcp",
     setup:

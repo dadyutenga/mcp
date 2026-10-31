@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { firstRun, prepareLocal } from "../src/first-run.js";
 import { database } from "../src/db.js";
 import { app } from "../src/server.js";
+import { parse } from "smol-toml";
 
 test("local setup generates independent secrets, repairs placeholders and preserves working credentials", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "mcp-first-local-"));
@@ -66,7 +67,7 @@ test("local setup generates independent secrets, repairs placeholders and preser
   }
 });
 
-test("one-command setup bootstraps a first owner, installs both global editors and resumes without re-enrollment", async () => {
+test("one-command setup bootstraps a first owner, installs all five clients and resumes without re-enrollment", async () => {
   const pool = await database(process.env.TEST_DATABASE_URL);
   await pool.query("TRUNCATE users CASCADE");
   const root = await mkdtemp(path.join(os.tmpdir(), "mcp-first-user-"));
@@ -81,6 +82,18 @@ test("one-command setup bootstraps a first owner, installs both global editors a
   });
   try {
     await mkdir(home);
+    await mkdir(path.join(home, ".codex"));
+    const originalCodex =
+      '# Keep a backup of this comment\nmodel = "fixture-model"\n[mcp_servers.github]\ncommand = "existing-tool"\n';
+    await writeFile(path.join(home, ".codex", "config.toml"), originalCodex);
+    const originalClaude = {
+      theme: "dark",
+      projects: { "/existing": { hasTrustDialogAccepted: true } },
+    };
+    await writeFile(
+      path.join(home, ".claude.json"),
+      JSON.stringify(originalClaude),
+    );
     await mkdir(path.join(repo, "product"), { recursive: true });
     await promisify(execFile)("git", ["init", repo]);
     await writeFile(
@@ -95,7 +108,7 @@ test("one-command setup bootstraps a first owner, installs both global editors a
       root: repo,
       home,
       url,
-      client: "both",
+      client: "all",
       project,
       prompt: async () => {
         throw Error(
@@ -108,7 +121,24 @@ test("one-command setup bootstraps a first owner, installs both global editors a
       log: (value) => logs.push(value),
     };
     const result = await firstRun(options);
-    assert.equal(result.configurations.length, 2);
+    assert.equal(result.configurations.length, 5);
+    assert.equal(
+      await readFile(
+        path.join(home, ".codex", "config.toml.coordination-backup"),
+        "utf8",
+      ),
+      originalCodex,
+    );
+    assert.equal(
+      parse(await readFile(path.join(home, ".codex", "config.toml"), "utf8"))
+        .model,
+      "fixture-model",
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(home, ".claude.json"), "utf8"))
+        .projects,
+      originalClaude.projects,
+    );
     const owner = JSON.parse(await readFile(result.profile_file, "utf8"));
     assert.equal(owner.username, "operator");
     assert.equal(owner.project, project);
@@ -122,7 +152,7 @@ test("one-command setup bootstraps a first owner, installs both global editors a
         [project],
       )
     ).rows;
-    assert.equal(rows[0].count, "2");
+    assert.equal(rows[0].count, "5");
     assert.deepEqual(await firstRun(options), result);
     assert.equal(
       (await pool.query("SELECT count(*) FROM users")).rows[0].count,
@@ -132,16 +162,25 @@ test("one-command setup bootstraps a first owner, installs both global editors a
     for (const config of result.configurations) {
       const text = await readFile(config, "utf8");
       assert.ok(!text.includes(owner.password));
-      assert.ok(
-        JSON.parse(text).mcpServers.coordination.env
-          .COORDINATION_ENROLLMENT_TOKEN_FILE,
-      );
+      const servers = config.endsWith(".toml")
+        ? parse(text).mcp_servers
+        : JSON.parse(text).mcpServers;
+      assert.ok(servers.coordination.env.COORDINATION_ENROLLMENT_TOKEN_FILE);
     }
     const output = await promisify(execFile)(process.execPath, [
       fileURLToPath(new URL("../../setup.mjs", import.meta.url)),
       "--help",
     ]);
     assert.match(output.stdout, /node setup.mjs/);
+    const version = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../../setup.mjs", import.meta.url)),
+      "--version",
+    ]);
+    assert.equal(version.stdout.trim(), "1.5.0");
+    assert.equal(
+      (await (await fetch(new URL("/", url))).json()).version,
+      "1.5.0",
+    );
   } finally {
     await server.close();
     // These installation-only fixtures have no repository/task dependencies.

@@ -6,10 +6,40 @@ export const CLIENT_CONFIGS = Object.freeze({
 export const GLOBAL_CLIENT_CONFIGS = Object.freeze({
   cursor: ".cursor/mcp.json",
   antigravity: ".gemini/antigravity/mcp_config.json",
+  codex: ".codex/config.toml",
+  claude: ".claude.json",
+  grok: ".grok/config.toml",
 });
+export const GLOBAL_CLIENTS = Object.freeze([
+  ...Object.keys(GLOBAL_CLIENT_CONFIGS),
+  "generic",
+]);
+export function normalizeGlobalClient(client) {
+  if (client === "claude-code") return "claude";
+  if (client === "grok-build") return "grok";
+  return client;
+}
+export function selectedClients(input) {
+  const selected = String(input)
+    .toLowerCase()
+    .split(",")
+    .flatMap((value) => {
+      const name = normalizeGlobalClient(value.trim());
+      if (name === "all") return Object.keys(GLOBAL_CLIENT_CONFIGS);
+      if (name === "both") return ["cursor", "antigravity"];
+      if (!Object.hasOwn(GLOBAL_CLIENT_CONFIGS, name))
+        throw Error(
+          "Choose cursor, antigravity, codex, claude, grok, a comma-separated list, or all",
+        );
+      return [name];
+    });
+  return [...new Set(selected)];
+}
 export function globalClientConfiguration(client = "cursor") {
   if (!Object.hasOwn(GLOBAL_CLIENT_CONFIGS, client))
-    throw Error("Choose --client cursor or --client antigravity");
+    throw Error(
+      "Choose --client cursor, antigravity, codex, claude, or grok; generic requires --config-file",
+    );
   return GLOBAL_CLIENT_CONFIGS[client];
 }
 export function clientConfiguration(client = "cursor") {

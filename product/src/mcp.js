@@ -1,10 +1,11 @@
 import { MCP_SERVER_NAME } from "./configuration.js";
+import { VERSION } from "./version.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 export function mcp(service, principal) {
   const server = new McpServer({
     name: MCP_SERVER_NAME,
-    version: "0.1.0",
+    version: VERSION,
   });
   const tool = (name, schema, run) =>
     server.registerTool(

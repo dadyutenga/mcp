@@ -15,12 +15,19 @@ node setup.mjs
 ```
 
 Or, after installing product dependencies, run `npm run setup --prefix product`.
-The command checks for dependencies, helps select Cursor/Antigravity/both, and
+The command checks for dependencies, helps select Cursor, Antigravity, Codex,
+Claude Code or Grok Build, and
 connects to an existing service or offers to start a local Docker Compose stack.
 Docker Desktop/Engine with Compose must be running to create a local stack.
 It generates independent database/bootstrap secrets, creates the first operator
 account with a generated password, and installs the global editor connections.
 No private JSON file needs to be prepared by hand.
+
+Use `node setup.mjs --client codex,claude,grok` for those three clients, or
+`node setup.mjs --client all` for all five. Client names are comma-separated;
+duplicates are removed. `claude-code` and `grok-build` are aliases. The older
+`both` selection still means Cursor and Antigravity. Interactive setup defaults
+to Cursor. `node setup.mjs --version` prints the installed platform version.
 
 Account details are stored with private permissions in
 `~/.config/agent-coordination/installations/<service-id>/owner.json`.
@@ -101,8 +108,9 @@ Create a private operator JSON file outside Git, using the existing owner accoun
 npm run setup:global --prefix product -- --config /absolute/private/global-setup.json
 ```
 
-The owner must already exist; first-time owner bootstrap remains in the operator
-setup below. Setup finds or creates the project and issues a project enrollment
+The owner must already exist, or the private JSON must include the service's
+`bootstrap_secret` for first-owner creation. Guided setup handles this automatically.
+Setup finds or creates the project and issues a project enrollment
 credential. That credential can register repository identities in this project;
 it cannot read tasks, edit files, perform worker actions, or manage the owner.
 Each registered worker is limited to its own repository. Default collaborators
@@ -111,16 +119,38 @@ cross-repository help. Owners can issue a narrower permission set through
 `installation_create`. Treat enrollment credentials as private: possession lets
 the client enroll workers for repositories in that project.
 
-Use a second operator JSON with `client: "antigravity"` and its own token file for
-Antigravity. Both installations should use the same project to discover each
-other. User config locations:
+Each client gets its own enrollment token and scoped worker identities. Use the
+same project across clients to discover each other. Native user config locations:
 
-- Cursor: `~/.cursor/mcp.json`.
-- Antigravity: `~/.gemini/antigravity/mcp_config.json`. If your editor's **Open MCP
-  Config** points elsewhere, supply `config_file` within your home directory.
+| Client argument          | File                                    | Format/source                                                                  |
+| ------------------------ | --------------------------------------- | ------------------------------------------------------------------------------ |
+| `cursor`                 | `~/.cursor/mcp.json`                    | `mcpServers` JSON                                                              |
+| `antigravity`            | `~/.gemini/antigravity/mcp_config.json` | `mcpServers` JSON                                                              |
+| `codex`                  | `~/.codex/config.toml`                  | [`mcp_servers` TOML](https://developers.openai.com/codex/mcp)                  |
+| `claude` / `claude-code` | `~/.claude.json`                        | [User-scope `mcpServers` JSON](https://code.claude.com/docs/en/mcp#user-scope) |
+| `grok` / `grok-build`    | `~/.grok/config.toml`                   | [`mcp_servers` TOML](https://docs.x.ai/build/features/mcp-servers)             |
+
+For custom locations, such as a different Antigravity config or Codex profile,
+supply `config_file` within your home directory. Other tools supporting the
+`mcpServers` JSON layout can use `client: "generic"` with an explicit `config_file`:
+
+```sh
+npm run setup:global --prefix product -- --client generic \
+  --token-file /absolute/private/enrollment.token \
+  --config-file /absolute/home/.other-client/mcp.json
+```
+
+Generic setup writes the specified user config; it does not assume every MCP
+client uses the same file format. Claude setup targets **Claude Code**. Claude
+Desktop can use the generic JSON option with its actual desktop configuration file.
+Native TOML entries include 30-second startup and 60-second tool timeouts.
 
 Other integrations in those files are preserved. Setup replaces only recognized
 coordination entries and rejects unrelated definitions using the same name.
+Before changing an existing file, setup stores its original text in
+`<config-file>.coordination-backup` with private permissions. The first backup is
+retained across reruns. TOML values and unrelated tables are preserved; formatting
+and comments can be normalized, so the backup retains the original presentation.
 The temporary operator session is logged out. Operator passwords and raw tokens
 are never included in setup output or IDE configuration. Repeat setup reuses the
 existing credential; a different project requires a separate credential file.

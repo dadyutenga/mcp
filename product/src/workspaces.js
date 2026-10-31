@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { VERSION } from "./version.js";
 const exec = promisify(execFile);
 
 export async function gitWorkspace(input) {
@@ -43,7 +44,7 @@ export async function gitWorkspace(input) {
 }
 
 export async function connectAgent(url, token, name) {
-  const client = new Client({ name, version: "1" });
+  const client = new Client({ name, version: VERSION });
   try {
     await client.connect(
       new StreamableHTTPClientTransport(url, {

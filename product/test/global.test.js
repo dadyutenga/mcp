@@ -159,6 +159,11 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         );
         const result = await installGlobal({ home, tokenFile, url: url.href });
         assert.deepEqual(result.configurations, [config]);
+        assert.ok(
+          (await readFile(config + ".coordination-backup", "utf8")).includes(
+            "existing-tool",
+          ),
+        );
         const output = await readFile(config, "utf8");
         assert.ok(!output.includes(installation.token));
         const installed = JSON.parse(output);
@@ -174,6 +179,23 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         await assert.rejects(
           installGlobal({ home, tokenFile: workerToken, url: url.href }),
           /enrollment credential/,
+        );
+        await assert.rejects(
+          installGlobal({ home, tokenFile, url: url.href, client: "generic" }),
+          /requires --config-file/,
+        );
+        const genericFile = path.join(home, ".other-client", "mcp.json");
+        await installGlobal({
+          home,
+          tokenFile,
+          url: url.href,
+          client: "generic",
+          configFile: genericFile,
+        });
+        assert.equal(
+          JSON.parse(await readFile(genericFile, "utf8")).mcpServers
+            .coordination.env.COORDINATION_CLIENT_NAME,
+          "generic",
         );
         await assert.rejects(
           installGlobal({

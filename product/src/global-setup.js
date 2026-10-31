@@ -16,8 +16,10 @@ import { z } from "zod";
 import { endpoint, privateFile } from "./credentials.js";
 import {
   globalClientConfiguration,
-  singleServerConfiguration,
+  GLOBAL_CLIENTS,
+  normalizeGlobalClient,
 } from "./configuration.js";
+import { renderClientConfiguration } from "./client-config.js";
 import { connectAgent, gitWorkspace } from "./workspaces.js";
 
 async function configurationPath(home, relative) {
@@ -44,12 +46,19 @@ export async function installGlobal({
   configFile,
   projectId,
 }) {
+  client = normalizeGlobalClient(client);
+  if (!GLOBAL_CLIENTS.includes(client))
+    throw Error("Unknown global MCP client");
+  if (client === "generic" && !configFile)
+    throw Error(
+      "Generic JSON setup requires --config-file within your home directory",
+    );
   const root = await realpath(home);
   const relative = configFile
     ? path.relative(root, path.resolve(configFile))
     : globalClientConfiguration(client);
   // Validate the selected client even when a custom config path is supplied.
-  globalClientConfiguration(client);
+  if (client !== "generic") globalClientConfiguration(client);
   const file = await configurationPath(root, relative);
   const credential = await realpath(tokenFile);
   let inRepo = false;
@@ -100,16 +109,24 @@ export async function installGlobal({
     },
   };
   const text = await readFile(file, "utf8").catch((e) => {
-    if (e.code === "ENOENT") return "{}";
+    if (e.code === "ENOENT") return "";
     throw e;
   });
   if (Buffer.byteLength(text) > 1048576)
     throw Error("Existing IDE configuration is too large");
-  const result = singleServerConfiguration(JSON.parse(text), definition);
+  const result = renderClientConfiguration(client, text, definition);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (text && text !== result.content) {
+    await writeFile(file + ".coordination-backup", text, {
+      mode: 0o600,
+      flag: "wx",
+    }).catch((e) => {
+      if (e.code !== "EEXIST") throw e;
+    });
+  }
   const temporary = file + "." + randomUUID() + ".tmp";
   try {
-    await writeFile(temporary, JSON.stringify(result.config, null, 2) + "\n", {
+    await writeFile(temporary, result.content, {
       mode: 0o600,
       flag: "wx",
     });
@@ -133,7 +150,10 @@ const schema = z
     password: z.string().min(12),
     bootstrap_secret: z.string().optional(),
     project: z.string().min(1),
-    client: z.enum(["cursor", "antigravity"]).default("cursor"),
+    client: z.preprocess(
+      (value) => normalizeGlobalClient(value ?? "cursor"),
+      z.enum(GLOBAL_CLIENTS),
+    ),
     token_file: z.string(),
     config_file: z.string().optional(),
     expires_hours: z.number().min(1).max(8760).default(720),

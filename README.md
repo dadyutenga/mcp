@@ -1,4 +1,4 @@
-# MCP Agent Coordination
+# MCP Agent Coordination v1.5
 
 A **headless coordination service** for agents working across two or more repositories.
 Agents connect through MCP to share work status, coordinate tasks and file leases,
@@ -6,7 +6,7 @@ publish versioned context, request scoped help, and discover authorized peers.
 There is no frontend or browser setup.
 
 The central product uses PostgreSQL, authenticated Streamable HTTP MCP and a stdio
-bridge for Cursor/Antigravity. Private token files identify agents and repo grants
+bridge for Cursor, Antigravity, Codex, Claude Code and Grok Build. Private token files identify agents and repo grants
 limit their access. A connecting agent cannot impersonate another agent by choosing
 a name, header or query parameter.
 
@@ -24,9 +24,29 @@ node setup.mjs
 Setup installs Node dependencies and asks which editor to connect and what to
 call your workspace. Accept the default service URL to run locally. It generates
 the service secrets, starts Docker, creates the first operator account, and
-installs **global** MCP configuration for Cursor, Antigravity, or both. No JSON
+installs **global** MCP configuration for your selected clients. No JSON
 or `.env` editing is required. First-time Docker image downloads/builds can take
 a few minutes.
+
+Select one client, several clients, or all five:
+
+```sh
+node setup.mjs --client codex,claude,grok
+node setup.mjs --client all
+```
+
+| Client      | Global configuration                    |
+| ----------- | --------------------------------------- |
+| Cursor      | `~/.cursor/mcp.json`                    |
+| Antigravity | `~/.gemini/antigravity/mcp_config.json` |
+| Codex       | `~/.codex/config.toml`                  |
+| Claude Code | `~/.claude.json`                        |
+| Grok Build  | `~/.grok/config.toml`                   |
+
+Setup preserves unrelated settings and MCP servers, and saves an original
+configuration backup before modifying an existing file. `claude-code` and
+`grok-build` are also accepted client names. The older `--client both` continues
+to select Cursor and Antigravity.
 
 Reload/enable **coordination** in your editor's MCP settings once. Open any Git
 repository: its repository record and agent identity register automatically.
@@ -53,6 +73,12 @@ its bootstrap secret. Run `node setup.mjs --help` for options.
 
 See [global setup](product/README.md#global-setup-with-automatic-repository-registration)
 for manual configuration, automation and additional MCP clients.
+
+Download the [v1.5.0 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.0)
+or read the [changelog](CHANGELOG.md). Existing checkouts can update with
+`git pull --ff-only`, then rerun setup for any additional clients. Existing tokens,
+repository registrations and database records are retained. Check the installed
+version with `node setup.mjs --version`.
 
 ## Manual service setup
 
