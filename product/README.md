@@ -6,6 +6,41 @@ working in different repositories use the same service for scoped tasks, leases,
 context versions, cross-repo requests, peer discovery and change events. Existing
 local SQLite MCP mode remains in `tools/agent-coordination`.
 
+## Guided first-time installation
+
+From a cloned checkout with Node.js 24+ and Git installed:
+
+```sh
+node setup.mjs
+```
+
+Or, after installing product dependencies, run `npm run setup --prefix product`.
+The command checks for dependencies, helps select Cursor/Antigravity/both, and
+connects to an existing service or offers to start a local Docker Compose stack.
+Docker Desktop/Engine with Compose must be running to create a local stack.
+It generates independent database/bootstrap secrets, creates the first operator
+account with a generated password, and installs the global editor connections.
+No private JSON file needs to be prepared by hand.
+
+Account details are stored with private permissions in
+`~/.config/agent-coordination/installations/<service-id>/owner.json`.
+Enrollment tokens are scoped by service, editor and project in the same directory;
+passwords and raw tokens are never printed or written into IDE config files.
+Setup reuses saved account details and existing valid service secrets, and can
+resume after an interrupted first-account bootstrap. Existing `.env` example
+placeholders are replaced with generated values; existing local-PostgreSQL
+configurations are preserved and should be started with `start:local` first.
+
+When connecting to an already configured service, setup asks for owner credentials
+only if none are saved for that URL. Passwords/bootstrap input is hidden. Remote
+services require HTTPS and must already be running. The CLI also supports
+`--url`, `--client`, `--project` and `--config /absolute/private/global-setup.json`
+for automation; noninteractive use should provide `--config`.
+
+After setup, reload/enable the global MCP connection in your editor. New Git
+repositories register automatically through MCP roots. Details and manual setup
+are below.
+
 ## Start the service
 
 Use Node.js 24 and PostgreSQL 16+ (Compose uses PostgreSQL 17), or Docker Compose:
@@ -40,6 +75,120 @@ access and does not require a browser. Existing owner accounts keep their passwo
 Configure **one server named `coordination`**. Tasks, file leases, shared context,
 requests and runtime tools all come from this same endpoint. Do not add the old
 `local-agent-coordination` or `coordination-product` entry alongside it.
+
+## Global setup with automatic repository registration
+
+Install coordination once in each editor's **user configuration** to use it across
+repositories. No `.cursor/mcp.json`, `.agents/mcp_config.json`, `.gitignore` change
+or setup command is required in a newly opened repository. The central service
+must be running; editors still need to enable/reload their MCP connection.
+
+Create a private operator JSON file outside Git, using the existing owner account:
+
+```json
+{
+  "url": "http://127.0.0.1:4310/mcp",
+  "username": "operator",
+  "password": "REPLACE_WITH_PRIVATE_OPERATOR_PASSWORD",
+  "project": "ride-hailing",
+  "client": "cursor",
+  "token_file": "/absolute/private/coordination/cursor-enrollment.token",
+  "expires_hours": 720
+}
+```
+
+```sh
+npm run setup:global --prefix product -- --config /absolute/private/global-setup.json
+```
+
+The owner must already exist; first-time owner bootstrap remains in the operator
+setup below. Setup finds or creates the project and issues a project enrollment
+credential. That credential can register repository identities in this project;
+it cannot read tasks, edit files, perform worker actions, or manage the owner.
+Each registered worker is limited to its own repository. Default collaborators
+can create/claim tasks, reserve files, publish context and request/approve scoped
+cross-repository help. Owners can issue a narrower permission set through
+`installation_create`. Treat enrollment credentials as private: possession lets
+the client enroll workers for repositories in that project.
+
+Use a second operator JSON with `client: "antigravity"` and its own token file for
+Antigravity. Both installations should use the same project to discover each
+other. User config locations:
+
+- Cursor: `~/.cursor/mcp.json`.
+- Antigravity: `~/.gemini/antigravity/mcp_config.json`. If your editor's **Open MCP
+  Config** points elsewhere, supply `config_file` within your home directory.
+
+Other integrations in those files are preserved. Setup replaces only recognized
+coordination entries and rejects unrelated definitions using the same name.
+The temporary operator session is logged out. Operator passwords and raw tokens
+are never included in setup output or IDE configuration. Repeat setup reuses the
+existing credential; a different project requires a separate credential file.
+Credentials expire after 720 hours by default (maximum 8760); revoke the
+installation agent or its enrollment token to invalidate its worker credentials.
+Issue a new installation and use a new token file to replace expired credentials.
+
+For an already issued enrollment token, install without operator credentials:
+
+```sh
+npm run setup:global --prefix product -- --client cursor \
+  --token-file /absolute/private/coordination/cursor-enrollment.token
+```
+
+The resulting entry can also be added to another MCP client's global config:
+
+```json
+{
+  "mcpServers": {
+    "coordination": {
+      "command": "node",
+      "args": ["/absolute/path/to/mcp/product/src/bridge.js"],
+      "env": {
+        "COORDINATION_URL": "http://127.0.0.1:4310/mcp",
+        "COORDINATION_ENROLLMENT_TOKEN_FILE": "/absolute/private/enrollment.token"
+      }
+    }
+  }
+}
+```
+
+At initialization, the bridge asks the client for **MCP roots** and resolves each
+root to its Git top-level directory. It registers the repository and a stable
+identity for that installation, client and repository, then proxies normal tools
+with a scoped worker credential held in memory. It does not scan other folders
+or read source files. Multiple clients opening the same path share the repository
+record and have distinct worker identities. Existing records with equivalent
+Windows paths are reused. Existing repository-scoped connections still work.
+
+- `workspace_status` shows registrations, active repository and discovery errors.
+- `workspace_register({path:"/absolute/repo"})` registers a repository explicitly
+  when the editor does not supply roots. Without roots the bridge also tries its
+  working directory; if that is not a Git repository, manual registration stays
+  available. It never guesses a repository from the bridge script's location.
+- With multiple roots, use `workspace_select({repo_id})` before tools without a
+  repository argument. Calls containing `repo_id` or `input.repo_id` route to that
+  registered repository's identity. This avoids silently acting in another repo.
+- Root-change notifications register new repositories and close connections to
+  removed repositories. Active connections refresh presence every 60 seconds;
+  peers become stale after 15 minutes without activity.
+- `collaboration_list({after?,limit?})` discovers repository IDs/names/references
+  and up to ten agents per repository within authorized projects. It is a
+  metadata directory, not access to another repository's tasks or source.
+- `events_poll` includes registration events from repositories in the same
+  authorized project, so peers can refresh the directory when another agent joins.
+- Use a discovered `repo_id` as `target_repo` in `request_create`; the target's
+  delegates see the request through `cross_repo_requests_list` and `events_poll`,
+  then use `request_decide` and `request_answer`. The requester reads the response
+  through `cross_repo_responses_list`. Publish context to specific repositories
+  with `context_publish`. MCP does not control or wake an external editor agent;
+  each active agent must poll/use its connection to receive work.
+
+Remove recognized repository-local coordination entries when migrating an
+existing installation: a local entry can shadow the global one. Preserve unrelated
+MCP servers and any existing coordination data. Global setup deliberately does
+not rewrite configurations inside repositories.
+
+## Existing repository-scoped setup
 
 Setup writes only the selected client's config: Cursor by default
 (`.cursor/mcp.json`), or Antigravity when `client: "antigravity"` / `--client
@@ -245,7 +394,7 @@ for each profile. The worker receives a private, independent checkout at
 file proposals as its final stdout JSON line:
 
 ```json
-{"files":[{"path":"api-contract.md","content":"# Reviewed contract\n"}]}
+{ "files": [{ "path": "api-contract.md", "content": "# Reviewed contract\n" }] }
 ```
 
 Use the owner HTTP API (`POST /api/v1/runtime/start`, then
@@ -286,7 +435,6 @@ job lock and connection slot, and stale results cannot overwrite newer state.
 Four additional lock regressions bring the product suite to 27 tests; these cover
 blocked Docker calls, stale state/version guards, pool capacity and failure cleanup.
 
-
 This adapter runs the API as a **host Node.js process**, with Git and Docker CLI,
 on the same host/filesystem as its selected Docker daemon. Default Compose mode
 continues without a Docker socket or privileged runtime access. Do not mount a
@@ -302,11 +450,15 @@ Create a private JSON configuration outside source control, for example:
 ```json
 {
   "root": "/absolute/private/coordination-jobs",
-  "repositories": {"<repo-uuid>": "/absolute/path/to/backend"},
+  "repositories": { "<repo-uuid>": "/absolute/path/to/backend" },
   "profiles": {
     "contract-demo": {
       "image": "node:24-alpine",
-      "command": ["node", "-e", "console.log(JSON.stringify({files:[{path:'api-contract.md',content:'# Reviewed contract'}]}));setInterval(()=>{},1000)"],
+      "command": [
+        "node",
+        "-e",
+        "console.log(JSON.stringify({files:[{path:'api-contract.md',content:'# Reviewed contract'}]}));setInterval(()=>{},1000)"
+      ],
       "max_seconds": 3600
     }
   }

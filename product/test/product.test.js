@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { database } from "../src/db.js";
 import { app } from "../src/server.js";
 import { permissions, normalizePath } from "../src/service.js";
@@ -250,15 +251,14 @@ test("real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
         requestInit: { headers: { Authorization: "Bearer " + bb.token } },
       }),
     );
-    const { StdioClientTransport } = await import(
-      "@modelcontextprotocol/sdk/client/stdio.js"
-    );
+    const { StdioClientTransport } =
+      await import("@modelcontextprotocol/sdk/client/stdio.js");
     const bridge = new Client({ name: "bridge-test", version: "1" });
     clients.push(bridge);
     await bridge.connect(
       new StdioClientTransport({
         command: process.execPath,
-        args: [new URL("../src/bridge.js", import.meta.url).pathname],
+        args: [fileURLToPath(new URL("../src/bridge.js", import.meta.url))],
         env: {
           ...process.env,
           COORDINATION_URL: base() + "/mcp",

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup": "node ../setup.mjs",
     "start": "node src/server.js",
     "start:local": "node --env-file=.env src/server.js",
     "build": "tsc --noEmit",
@@ -12,6 +13,7 @@
     "test:compose": "node test/compose-acceptance.js",
     "diagnostics": "node src/operations.js diagnostics",
     "setup:agent": "node src/setup.js",
+    "setup:global": "node src/global-setup.js",
     "setup:operator": "node src/operator-setup.js"
   },
   "dependencies": {

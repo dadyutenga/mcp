@@ -10,7 +10,51 @@ bridge for Cursor/Antigravity. Private token files identify agents and repo gran
 limit their access. A connecting agent cannot impersonate another agent by choosing
 a name, header or query parameter.
 
-## Start and set up agents
+## First-time setup
+
+Install **Node.js 24+** and **Git**. For a new local service, also install and start
+Docker Desktop (or Docker Engine with Compose). Then:
+
+```sh
+git clone https://github.com/dadyutenga/mcp.git
+cd mcp
+node setup.mjs
+```
+
+Setup installs Node dependencies and asks which editor to connect and what to
+call your workspace. Accept the default service URL to run locally. It generates
+the service secrets, starts Docker, creates the first operator account, and
+installs **global** MCP configuration for Cursor, Antigravity, or both. No JSON
+or `.env` editing is required. First-time Docker image downloads/builds can take
+a few minutes.
+
+Reload/enable **coordination** in your editor's MCP settings once. Open any Git
+repository: its repository record and agent identity register automatically.
+Agents use `collaboration_list` to discover repositories and request help from the
+right one. No MCP configuration is needed inside each repository. Clients that
+do not provide workspace roots can call `workspace_register` with the repo path.
+
+Private account details and enrollment tokens are saved outside Git under
+`~/.config/agent-coordination/installations/`. Setup prints the account file path,
+never its password. Keep that file private; rerunning setup reuses it. Docker
+restarts the service when Docker starts again. Agents connect while the service
+and their editor MCP connection are running; external agents receive work by
+polling MCP.
+
+Already have a service? Supply its URL; Docker is not needed on this computer:
+
+```sh
+node setup.mjs --url https://coordination.example/mcp --client cursor
+```
+
+For an existing service without saved credentials, setup asks for the owner login
+with hidden password entry. Connecting to a fresh remote service also requires
+its bootstrap secret. Run `node setup.mjs --help` for options.
+
+See [global setup](product/README.md#global-setup-with-automatic-repository-registration)
+for manual configuration, automation and additional MCP clients.
+
+## Manual service setup
 
 ```sh
 cp product/.env.example product/.env
@@ -28,20 +72,9 @@ npm run build --prefix product
 npm run start:local --prefix product
 ```
 
-Prepare a private operator JSON file using the [setup example](product/README.md#one-command-operator-setup-for-each-repository):
-
-```sh
-npm run setup:operator --prefix product -- --config /absolute/private/backend-setup.json
-npm run setup:operator --prefix product -- --config /absolute/private/admin-ui-setup.json
-```
-
-Use the same project name and distinct repo/agent/token paths. Setup provisions
-resources, stores credentials outside the repos, verifies MCP access, and merges
-one selected IDE configuration with a single `coordination` server entry. Cursor
-is the default; choose Antigravity explicitly. Recognized old coordination aliases
-are replaced while unrelated MCP integrations are preserved.
-Already enrolled agents can run `setup:agent`. Restart the IDE MCP connection after
-setup. Neither a frontend nor manual database edits are needed.
+Then run `node setup.mjs` to connect your editors globally. The existing
+[repository-scoped setup](product/README.md#one-command-operator-setup-for-each-repository)
+remains available for older installations and deliberately restricted connections.
 
 All tools below use **the same MCP server** and `/mcp` endpoint. You do not need
 a second local MCP server for shared context or file coordination. See the
@@ -49,7 +82,8 @@ a second local MCP server for shared context or file coordination. See the
 
 ## Coordination tools
 
-- Setup/discovery: `agent_setup`, `identity_get`, `agent_list`, `state_snapshot`.
+- Setup/discovery: `workspace_register`, `workspace_status`, `workspace_select`,
+  `collaboration_list`, `agent_setup`, `identity_get`, `agent_list`, `state_snapshot`.
 - Tasks: `task_create`, `tasks_list/get`, `task_claim`, `task_update`, `task_comment`,
   `task_handoff`, plus dependency checks and versioned lifecycle history.
 - Files: `reservation_acquire`, `reservation_release`, `file_reservations_list/get`.

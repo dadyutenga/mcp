@@ -11,6 +11,12 @@ const canonical = (value) =>
         )
       : v,
   );
+const workspaceReference = (value) => {
+  const normalized = value.replaceAll("\\", "/").replace(/\/+$/, "");
+  return /^[A-Za-z]:\//.test(normalized)
+    ? normalized.toLowerCase()
+    : normalized;
+};
 export const token = () => randomBytes(32).toString("base64url");
 export class Fault extends Error {
   constructor(status, message) {
@@ -51,6 +57,12 @@ export const permissions = [
   "cross_repo:approve",
 ];
 const schemas = {
+  installation_create: z.object({
+    project_id: uuid,
+    name: short,
+    permissions: z.array(z.enum(permissions)).min(1).default(permissions),
+    expires_hours: z.number().min(1).max(8760).default(720),
+  }),
   project_create: z.object({
     name: short,
     description: text.default("Project"),
@@ -199,7 +211,7 @@ export class Service {
   constructor(pool) {
     this.pool = pool;
   }
-  async assertPrincipal(c, p) {
+  async assertPrincipal(c, p, { enrollment = false } = {}) {
     if (p.owner) return;
     const agent = await get(c, "agents", p.id);
     if (!agent || agent.revoked) fail(401, "Agent revoked");
@@ -212,6 +224,23 @@ export class Service {
         Date.parse(credential.expires_at) <= Date.now()
       )
         fail(401, "Expired or revoked token");
+      if (credential.kind === "enrollment" && !enrollment)
+        fail(403, "Installation credentials may only register workspaces");
+    }
+    if (agent.installation_id) {
+      const installation = await get(c, "agents", agent.installation_id);
+      const credential =
+        installation &&
+        (await get(c, "agent_tokens", agent.enrollment_token_id));
+      if (
+        !installation ||
+        installation.revoked ||
+        !credential ||
+        credential.revoked ||
+        credential.agent_id !== installation.id ||
+        Date.parse(credential.expires_at) <= Date.now()
+      )
+        fail(401, "Installation expired or revoked");
     }
   }
   async grants(c, agent) {
@@ -269,7 +298,13 @@ export class Service {
         "UPDATE agents SET body=jsonb_set(body,'{heartbeat}',to_jsonb(now()::text)) WHERE id=$1",
         [a.id],
       );
-      return { id: a.id, token_id: t.id };
+      const principal = {
+        id: a.id,
+        token_id: t.id,
+        ...(t.kind === "enrollment" ? { enrollment: true } : {}),
+      };
+      await this.assertPrincipal(c, principal, { enrollment: true });
+      return principal;
     }).catch(async (error) => {
       if (error.statusCode === 401)
         await transaction(this.pool, (c) =>
@@ -523,6 +558,192 @@ export class Service {
       { readOnly: true },
     );
   }
+  async registerWorkspace(p, input) {
+    const x = z
+      .object({
+        name: short,
+        reference: short,
+        client: short,
+        default_branch: short.default("main"),
+        case_sensitive: z.boolean().default(true),
+      })
+      .strict()
+      .parse(input);
+    rejectSecrets(x);
+    return transaction(this.pool, async (c) => {
+      await this.assertPrincipal(c, p, { enrollment: true });
+      const credential =
+        p.token_id && (await get(c, "agent_tokens", p.token_id));
+      const installation = await get(c, "agents", p.id);
+      if (credential?.kind !== "enrollment" || !installation.enrollment)
+        fail(403, "A project installation credential is required");
+      const policy = installation.enrollment;
+      const project = await get(c, "projects", policy.project_id);
+      if (!project || project.status !== "active")
+        fail(409, "Project unavailable");
+      // All write transactions already share the database coordination lock.
+      let repo = (await list(c, "repositories")).find(
+        (r) =>
+          r.project_id === project.id &&
+          workspaceReference(r.reference) === workspaceReference(x.reference),
+      );
+      if (repo?.status === "archived") fail(409, "Repository is archived");
+      if (!repo) {
+        repo = await put(c, "repositories", {
+          id: randomUUID(),
+          project_id: project.id,
+          name: x.name,
+          reference: x.reference,
+          default_branch: x.default_branch,
+          case_sensitive: x.case_sensitive,
+          status: "active",
+        });
+        await this.audit(c, p, "workspace_registered", repo.id, repo.id);
+      }
+      let agent = (await list(c, "agents")).find(
+        (a) =>
+          a.installation_id === installation.id &&
+          a.workspace_repo_id === repo.id &&
+          a.client === x.client,
+      );
+      if (agent?.revoked)
+        fail(403, "Workspace agent revoked; enroll a new installation");
+      if (!agent) {
+        agent = await put(c, "agents", {
+          id: randomUUID(),
+          name: `${installation.name}: ${x.client} / ${repo.name}`,
+          runtime: "external-mcp",
+          revoked: false,
+          untrusted: false,
+          installation_id: installation.id,
+          enrollment_token_id: credential.id,
+          workspace_repo_id: repo.id,
+          client: x.client,
+          heartbeat: new Date().toISOString(),
+        });
+        await put(c, "agent_repo_grants", {
+          id: randomUUID(),
+          agent_id: agent.id,
+          project_id: project.id,
+          repo_id: repo.id,
+          permissions: policy.permissions,
+          expires_at: credential.expires_at,
+        });
+        await this.audit(c, p, "workspace_agent_registered", agent.id, repo.id);
+      }
+      const raw = token();
+      await put(c, "agent_tokens", {
+        id: randomUUID(),
+        agent_id: agent.id,
+        hash: hash(raw),
+        prefix: raw.slice(0, 6),
+        expires_at: credential.expires_at,
+        revoked: false,
+      });
+      return {
+        agent_id: agent.id,
+        repo_id: repo.id,
+        project_id: project.id,
+        repository: { name: repo.name, reference: repo.reference },
+        token: raw,
+      };
+    });
+  }
+  async installationInfo(p) {
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p, { enrollment: true });
+        const credential =
+          p.token_id && (await get(c, "agent_tokens", p.token_id));
+        const installation = await get(c, "agents", p.id);
+        if (credential?.kind !== "enrollment" || !installation.enrollment)
+          fail(403, "A project installation credential is required");
+        const project = await get(
+          c,
+          "projects",
+          installation.enrollment.project_id,
+        );
+        if (!project || project.status !== "active")
+          fail(409, "Project unavailable");
+        return {
+          installation_id: installation.id,
+          project_id: project.id,
+          project: project.name,
+          permissions: installation.enrollment.permissions,
+          expires_at: credential.expires_at,
+        };
+      },
+      { readOnly: true },
+    );
+  }
+  async collaboration(p, { after = "", limit = 50 } = {}) {
+    if (after) uuid.parse(after);
+    z.number().int().min(1).max(50).parse(limit);
+    return transaction(
+      this.pool,
+      async (c) => {
+        await this.assertPrincipal(c, p);
+        const rows = (
+          await c.query(
+            `SELECT r.* FROM repositories r JOIN projects project ON project.id=r.project_id
+        WHERE r.body->>'status'='active' AND project.body->>'status'='active'
+        AND EXISTS(SELECT 1 FROM agent_repo_grants g WHERE g.agent_id=$1 AND g.project_id=r.project_id
+          AND g.body->'permissions' ? 'task:read'
+          AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now()))
+        AND ($2::uuid IS NULL OR r.id>$2) ORDER BY r.id LIMIT $3`,
+            [p.id, after || null, limit + 1],
+          )
+        ).rows.map(hydrate);
+        const items = [];
+        let bytes = 0;
+        for (const repo of rows.slice(0, limit)) {
+          const agents = (
+            await c.query(
+              `SELECT a.id,a.body->>'name' AS name,a.body->>'client' AS client,
+          a.body->>'heartbeat' AS last_active FROM agents a JOIN agent_repo_grants g ON g.agent_id=a.id
+          WHERE g.repo_id=$1 AND COALESCE((a.body->>'revoked')::boolean,false)=false
+          AND g.body->'permissions' ? 'task:read'
+          AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now())
+          AND (a.body->>'installation_id' IS NULL OR EXISTS(SELECT 1 FROM agents i
+            JOIN agent_tokens t ON t.id=(a.body->>'enrollment_token_id')::uuid
+            WHERE i.id=(a.body->>'installation_id')::uuid AND COALESCE((i.body->>'revoked')::boolean,false)=false
+            AND COALESCE((t.body->>'revoked')::boolean,false)=false AND (t.body->>'expires_at')::timestamptz>now()))
+          ORDER BY a.id LIMIT 11`,
+              [repo.id],
+            )
+          ).rows;
+          const item = {
+            repo_id: repo.id,
+            project_id: repo.project_id,
+            name: repo.name,
+            reference: repo.reference,
+            agents: agents
+              .slice(0, 10)
+              .map((a) => ({
+                ...a,
+                state:
+                  a.last_active &&
+                  Date.parse(a.last_active) > Date.now() - 900000
+                    ? "online"
+                    : "stale",
+              })),
+            more_agents: agents.length > 10,
+          };
+          const size = Buffer.byteLength(JSON.stringify(item));
+          if (bytes + size > 30000) break;
+          bytes += size;
+          items.push(item);
+        }
+        return {
+          items,
+          has_more: rows.length > items.length,
+          next_cursor: items.at(-1)?.repo_id || after,
+        };
+      },
+      { readOnly: true },
+    );
+  }
   async setup(p, { repo_id } = {}) {
     if (repo_id) z.uuid().parse(repo_id);
     return transaction(
@@ -591,15 +812,13 @@ export class Service {
           )
         ).rows;
         return {
-          items: rows
-            .slice(0, limit)
-            .map((r) => ({
-              ...r,
-              state:
-                r.last_active && Date.parse(r.last_active) > Date.now() - 900000
-                  ? "online"
-                  : "stale",
-            })),
+          items: rows.slice(0, limit).map((r) => ({
+            ...r,
+            state:
+              r.last_active && Date.parse(r.last_active) > Date.now() - 900000
+                ? "online"
+                : "stale",
+          })),
           has_more: rows.length > limit,
           next_cursor: rows.slice(0, limit).at(-1)?.id || after,
         };
@@ -679,7 +898,10 @@ export class Service {
         );
         return (
           await c.query(
-            "SELECT * FROM audit_events WHERE id>$1 AND ((recipient_agent_id IS NULL AND (actor=$2 OR repo_id=ANY($3))) OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))) ORDER BY id LIMIT 100",
+            `SELECT * FROM audit_events a WHERE id>$1 AND ((recipient_agent_id IS NULL AND
+              (actor=$2 OR repo_id=ANY($3) OR (action IN ('workspace_registered','workspace_agent_registered')
+                AND EXISTS(SELECT 1 FROM repositories r WHERE r.id::text=a.repo_id AND r.project_id=ANY($5::uuid[])))))
+              OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))) ORDER BY id LIMIT 100`,
             [
               after,
               p.id,
@@ -692,6 +914,7 @@ export class Service {
                     (!g.expires_at || Date.parse(g.expires_at) > Date.now()),
                 )
                 .map((g) => g.repo_id),
+              grants.map((g) => g.project_id),
             ],
           )
         ).rows;
@@ -711,7 +934,11 @@ export class Service {
       );
       if (key) {
         z.string().min(1).max(128).parse(key);
-        if (action === "agent_enroll" || action === "agent_rotate")
+        if (
+          ["agent_enroll", "agent_rotate", "installation_create"].includes(
+            action,
+          )
+        )
           fail(
             400,
             "Token issuance cannot be replayed; credentials are shown once",
@@ -738,6 +965,35 @@ export class Service {
       const save = (table, data) =>
         put(c, table, { id: randomUUID(), ...data });
       let r;
+      if (action === "installation_create") {
+        owner();
+        const project = await need("projects", x.project_id);
+        if (project.status !== "active") fail(409, "Project unavailable");
+        const agent = await save("agents", {
+          name: x.name,
+          runtime: "installation",
+          revoked: false,
+          untrusted: false,
+          enrollment: { project_id: project.id, permissions: x.permissions },
+        });
+        const raw = token();
+        const credential = await save("agent_tokens", {
+          agent_id: agent.id,
+          kind: "enrollment",
+          hash: hash(raw),
+          prefix: raw.slice(0, 6),
+          expires_at: new Date(
+            Date.now() + x.expires_hours * 3600000,
+          ).toISOString(),
+          revoked: false,
+        });
+        r = {
+          agent,
+          token: raw,
+          token_id: credential.id,
+          project_id: project.id,
+        };
+      }
       if (action === "project_create") {
         owner();
         r = await save("projects", { ...x, status: "active" });

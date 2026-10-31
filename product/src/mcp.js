@@ -28,6 +28,31 @@ export function mcp(service, principal) {
         }
       },
     );
+  if (principal.enrollment) {
+    tool("installation_info", z.object({}), () =>
+      service.installationInfo(principal),
+    );
+    tool(
+      "workspace_register",
+      z.object({
+        name: z.string().min(1).max(500),
+        reference: z.string().min(1).max(500),
+        client: z.string().min(1).max(500),
+        default_branch: z.string().min(1).max(500).optional(),
+        case_sensitive: z.boolean().optional(),
+      }),
+      (x) => service.registerWorkspace(principal, x),
+    );
+    return server;
+  }
+  tool(
+    "collaboration_list",
+    z.object({
+      after: z.uuid().optional(),
+      limit: z.number().int().min(1).max(50).default(50),
+    }),
+    (x) => service.collaboration(principal, x),
+  );
   tool("agent_setup", z.object({ repo_id: z.uuid().optional() }), (x) =>
     service.setup(principal, x),
   );

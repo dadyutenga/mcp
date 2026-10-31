@@ -3,6 +3,15 @@ export const CLIENT_CONFIGS = Object.freeze({
   cursor: ".cursor/mcp.json",
   antigravity: ".agents/mcp_config.json",
 });
+export const GLOBAL_CLIENT_CONFIGS = Object.freeze({
+  cursor: ".cursor/mcp.json",
+  antigravity: ".gemini/antigravity/mcp_config.json",
+});
+export function globalClientConfiguration(client = "cursor") {
+  if (!Object.hasOwn(GLOBAL_CLIENT_CONFIGS, client))
+    throw Error("Choose --client cursor or --client antigravity");
+  return GLOBAL_CLIENT_CONFIGS[client];
+}
 export function clientConfiguration(client = "cursor") {
   if (!Object.hasOwn(CLIENT_CONFIGS, client))
     throw Error("Choose --client cursor or --client antigravity");
