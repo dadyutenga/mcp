@@ -1,4 +1,4 @@
-# Install Coordination MCP v1.5
+# Install Coordination MCP v1.5.1
 
 Run setup yourself after installing the prerequisites below. Setup handles Node
 dependencies, service secrets, the first account and global MCP configuration.
@@ -6,8 +6,8 @@ dependencies, service secrets, the first account and global MCP configuration.
 ## 1. Prepare your computer
 
 - Install **Node.js 24 or newer** and **Git**.
-- For a new local service, install **Docker Desktop** on Windows/macOS, or Docker
-  Engine with Compose on Linux. Start Docker before running setup.
+- Install and start **PostgreSQL 16 or newer**. Keep your PostgreSQL username and
+  password available. Docker and `psql` are not required.
 - Install the clients you plan to use: Codex, Claude Code, Grok Build, Cursor or
   Antigravity.
 
@@ -16,24 +16,23 @@ Check your prerequisites in a terminal:
 ```sh
 node --version
 git --version
-docker info
 ```
 
-Docker is needed for a new local service. A client connecting to an already
-running service does not need Docker. The existing PostgreSQL option below also
-works without Docker.
+On Windows, PostgreSQL normally runs as a Windows service. Confirm it is running
+in Services or pgAdmin. PostgreSQL does not need to be on your terminal's PATH:
+setup connects directly through its Node driver.
 
 ## 2. Get the source
 
 Use your existing checkout, or clone the release:
 
 ```sh
-git clone --branch v1.5.0 https://github.com/dadyutenga/mcp.git
+git clone --branch v1.5.1 https://github.com/dadyutenga/mcp.git
 cd mcp
 ```
 
-You can also download and extract `mcp-1.5.0.zip` from the
-[v1.5.0 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.0). Open a
+You can also download and extract `mcp-1.5.1.zip` from the
+[v1.5.1 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.1). Open a
 terminal in the extracted directory containing `setup.mjs`.
 
 ## 3. Run setup
@@ -58,15 +57,49 @@ When prompted:
 1. Accept `http://127.0.0.1:4310/mcp` for a local service.
 2. Enter a workspace/project name. Use the same name for clients that should
    discover each other and collaborate.
-3. Answer `y` to start the local service with Docker if it is not running.
+3. Enter the PostgreSQL settings below. Press Enter to accept a default.
 
-The first Docker download/build may take a few minutes. Setup generates database
-and bootstrap secrets, creates the first operator account, and configures each
-selected client globally. It prints the location of the private account file;
-passwords and raw tokens are not printed. Keep that file for future setup runs.
+| Prompt                   | Default / what to enter                                              |
+| ------------------------ | -------------------------------------------------------------------- |
+| PostgreSQL host          | `127.0.0.1` for your computer, or your PostgreSQL server hostname/IP |
+| PostgreSQL port          | `5432`                                                               |
+| PostgreSQL database name | `coordination`, a dedicated database for this service                |
+| PostgreSQL username      | `postgres`, or the PostgreSQL account you use                        |
+| PostgreSQL password      | Your actual PostgreSQL password; input is hidden and has no default  |
 
-A new Docker installation creates its own database. Use the existing PostgreSQL
-option below to continue using earlier coordination history.
+The default database URL is:
+
+```text
+postgresql://postgres@127.0.0.1:5432/coordination
+```
+
+The password is collected separately. Setup constructs and saves the complete
+connection URL safely, including passwords containing special characters.
+The MCP service URL (`http://127.0.0.1:4310/mcp`) and PostgreSQL URL are different:
+port 4310 serves MCP; port 5432 is your database server.
+
+Setup verifies the PostgreSQL login and server version before saving settings.
+If the named database is missing, it asks whether to create it. The supplied
+PostgreSQL account needs database creation permission for that operation; an
+account that owns an existing database can use that database instead.
+
+It then starts the Node service in the background, waits for its readiness check,
+creates the first Coordination account and configures your selected MCP clients.
+Success is explicit:
+
+```text
+PostgreSQL connection verified (version 16).
+Service health verified at http://127.0.0.1:4310/mcp.
+READY: PostgreSQL and MCP service verified. Client connections configured.
+```
+
+For a new database, setup generates the Coordination operator password and prints
+the private account file's location. For an existing Coordination database it
+asks for the existing **Coordination owner** username/password. Those are separate
+from your PostgreSQL credentials. Passwords and raw tokens are never printed.
+Private service logs and PID information are saved beside the account file as
+`service.log` and `service.json`. After a computer restart, rerun setup to restart
+the service with the verified settings already saved in `product/.env`.
 
 ## 4. Reload and verify
 
@@ -99,27 +132,23 @@ grok mcp list
 
 For Claude Code, use `/mcp` to inspect the connection. Run only the commands for
 clients installed on your computer. The local service also exposes JSON metadata
-at `http://127.0.0.1:4310/`; its version should be `1.5.0`.
+at `http://127.0.0.1:4310/`; its version should be `1.5.1`.
 
 ## Existing local PostgreSQL installation
 
 If your previous installation used local PostgreSQL, its database and account
 can be reused. Keep the PostgreSQL service running.
 
-1. Restore the saved service environment to `product/.env`. After a local removal,
-   the private backup contains `service/product.env`. Copy that file back as
-   `product/.env`, preserving its private permissions.
-2. In the checkout, start the service in a separate terminal:
+Run `node setup.mjs --client codex,claude,grok` and enter your PostgreSQL settings.
+Setup starts the service automatically. If you already have a valid `product/.env`,
+its saved PostgreSQL connection is verified and reused without asking for the
+database password again.
 
-   ```sh
-   npm ci --prefix product
-   npm run start:local --prefix product
-   ```
-
-3. In your first terminal, run `node setup.mjs --client codex,claude,grok`.
-4. Accept the local service URL and enter the existing operator username/password
-   when asked. After a local removal, those details are in the private backup at
-   `credentials/operator-setup.json`. Open it privately on your computer.
+After a local removal, you can restore `service/product.env` from the private
+uninstall backup as `product/.env`, preserving private permissions. The existing
+Coordination owner credentials are in the backup's
+`credentials/operator-setup.json`. Open it privately when setup asks for the owner
+login. Database history is preserved.
 
 Setup issues fresh enrollment tokens. Previously revoked token files remain in
 the archive for reference; restoring the service environment and entering the
@@ -141,7 +170,9 @@ require HTTPS. For automation or custom client configuration paths, see the
 | Symptom                                        | Action                                                                                  |
 | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `node` or `git` is not recognized              | Install it, then open a new terminal.                                                   |
-| Docker is unavailable or cannot connect        | Install/start Docker Desktop or Docker Engine, then rerun setup.                        |
+| PostgreSQL cannot be reached                   | Start PostgreSQL; check its hostname/IP and port.                                       |
+| PostgreSQL rejects the password                | Enter the actual PostgreSQL account password, separate from the Coordination login.     |
+| Database creation is denied                    | Choose a database you own or use a PostgreSQL account with CREATEDB permission.         |
 | The service uses local PostgreSQL              | Start it using the PostgreSQL steps above before rerunning setup.                       |
 | Port 4310 is already in use                    | Connect to the existing coordination service, or stop the process using that port.      |
 | MCP is missing in the client                   | Reload/restart the client and enable its global `coordination` entry.                   |

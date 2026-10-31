@@ -10,62 +10,15 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { parseEnv } from "node:util";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { firstRun, prepareLocal } from "../src/first-run.js";
+import { firstRun } from "../src/first-run.js";
 import { database } from "../src/db.js";
 import { app } from "../src/server.js";
 import { parse } from "smol-toml";
-
-test("local setup generates independent secrets, repairs placeholders and preserves working credentials", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "mcp-first-local-"));
-  try {
-    await mkdir(path.join(root, "product"));
-    const file = path.join(root, "product", ".env");
-    await writeFile(
-      file,
-      "# existing settings\nPOSTGRES_PASSWORD=REPLACE_WITH_RANDOM_HEX\nBOOTSTRAP_SECRET=REPLACE_WITH_DIFFERENT_RANDOM_HEX\nOTHER=value\n",
-      { mode: 0o600 },
-    );
-    const calls = [];
-    const execute = async (command, args, options) =>
-      calls.push({ command, args, options });
-    const url = new URL("http://127.0.0.1:4310/mcp");
-    const secret = await prepareLocal({ root, url, execute });
-    const text = await readFile(file, "utf8"),
-      env = parseEnv(text);
-    assert.match(env.POSTGRES_PASSWORD, /^[a-f0-9]{64}$/);
-    assert.match(secret, /^[a-f0-9]{64}$/);
-    assert.notEqual(env.POSTGRES_PASSWORD, secret);
-    assert.equal(env.OTHER, "value");
-    assert.equal(env.COORDINATION_PORT, "4310");
-    assert.deepEqual(calls.at(-1).args.slice(-3), ["up", "--build", "--wait"]);
-    assert.ok(!JSON.stringify(calls.map((c) => c.args)).includes(secret));
-    await prepareLocal({ root, url, execute });
-    assert.equal(await readFile(file, "utf8"), text);
-    await assert.rejects(
-      prepareLocal({
-        root,
-        url: new URL("http://localhost:5432/mcp"),
-        execute,
-      }),
-      /port differs/,
-    );
-    await assert.rejects(
-      prepareLocal({
-        root,
-        url: new URL("https://remote.invalid/mcp"),
-        execute,
-      }),
-      /remote service first/,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+import { VERSION } from "../src/version.js";
 
 test("one-command setup bootstraps a first owner, installs all five clients and resumes without re-enrollment", async () => {
   const pool = await database(process.env.TEST_DATABASE_URL);
@@ -115,8 +68,8 @@ test("one-command setup bootstraps a first owner, installs all five clients and 
           "Fresh local setup must not ask for passwords or bootstrap values",
         );
       },
-      execute: async () => {
-        throw Error("An existing service must not start Docker");
+      startLocalService: async () => {
+        throw Error("An existing service must not be started twice");
       },
       log: (value) => logs.push(value),
     };
@@ -176,10 +129,10 @@ test("one-command setup bootstraps a first owner, installs all five clients and 
       fileURLToPath(new URL("../../setup.mjs", import.meta.url)),
       "--version",
     ]);
-    assert.equal(version.stdout.trim(), "1.5.0");
+    assert.equal(version.stdout.trim(), VERSION);
     assert.equal(
       (await (await fetch(new URL("/", url))).json()).version,
-      "1.5.0",
+      VERSION,
     );
   } finally {
     await server.close();

@@ -20,9 +20,12 @@ node setup.mjs
 Or, after installing product dependencies, run `npm run setup --prefix product`.
 The command checks for dependencies, helps select Cursor, Antigravity, Codex,
 Claude Code or Grok Build, and
-connects to an existing service or offers to start a local Docker Compose stack.
-Docker Desktop/Engine with Compose must be running to create a local stack.
-It generates independent database/bootstrap secrets, creates the first operator
+connects to an existing service or starts the Node service using PostgreSQL.
+It asks for PostgreSQL host, port, database, username and a hidden password.
+Defaults are `127.0.0.1`, `5432`, `coordination` and `postgres`; no password is
+assumed. It verifies the account, offers to create a missing database, saves the
+private settings and starts the service in the background.
+It generates a bootstrap secret, creates the first operator
 account with a generated password, and installs the global editor connections.
 No private JSON file needs to be prepared by hand.
 
@@ -38,8 +41,11 @@ Enrollment tokens are scoped by service, editor and project in the same director
 passwords and raw tokens are never printed or written into IDE config files.
 Setup reuses saved account details and existing valid service secrets, and can
 resume after an interrupted first-account bootstrap. Existing `.env` example
-placeholders are replaced with generated values; existing local-PostgreSQL
-configurations are preserved and should be started with `start:local` first.
+bootstrap placeholders are replaced with generated values. Saved PostgreSQL
+connections are verified and reused; the service starts automatically when needed.
+Private `service.log` and `service.json` files record logs and the background PID.
+Setup checks actual readiness before configuring clients and reporting **READY**.
+Docker is not used by setup or required for MCP coordination.
 
 When connecting to an already configured service, setup asks for owner credentials
 only if none are saved for that URL. Passwords/bootstrap input is hidden. Remote
@@ -53,15 +59,16 @@ are below.
 
 ## Start the service
 
-Use Node.js 24 and PostgreSQL 16+ (Compose uses PostgreSQL 17), or Docker Compose:
+Use Node.js 24+ and a running PostgreSQL 16+ server:
 
 ```sh
-cp product/.env.example product/.env
-# Replace both placeholders with independently generated values:
-# openssl rand -hex 32
-chmod 600 product/.env
-docker compose --env-file product/.env up --build --wait
+node setup.mjs --client all
 ```
+
+Default PostgreSQL URL: `postgresql://postgres@127.0.0.1:5432/coordination`.
+The password is entered separately and stays hidden. The Node driver connects
+directly; `psql` does not need to be on PATH. Authentication failures, unreachable
+hosts and database permission errors are reported before configuration is saved.
 
 `http://127.0.0.1:4310/` returns service metadata, not a web page. `/mcp` is the
 Streamable HTTP endpoint. PostgreSQL data, task history and previous migrations

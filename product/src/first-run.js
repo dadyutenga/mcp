@@ -1,14 +1,6 @@
-import {
-  readFile,
-  writeFile,
-  mkdir,
-  realpath,
-  lstat,
-  chmod,
-} from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { writeFile, mkdir, realpath, lstat } from "node:fs/promises";
 import { randomBytes, createHash } from "node:crypto";
-import { parseArgs, parseEnv } from "node:util";
+import { parseArgs } from "node:util";
 import { createInterface, emitKeypressEvents } from "node:readline";
 import path from "node:path";
 import os from "node:os";
@@ -17,35 +9,17 @@ import { endpoint, privateFile } from "./credentials.js";
 import { gitWorkspace } from "./workspaces.js";
 import { provisionGlobal } from "./global-setup.js";
 import { selectedClients } from "./configuration.js";
+import {
+  prepareLocal,
+  readEnvironment,
+  serviceReady,
+} from "./local-service.js";
+export { prepareLocal } from "./local-service.js";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const randomSecret = () => randomBytes(32).toString("hex");
 const key = (value) =>
   createHash("sha256").update(value).digest("hex").slice(0, 16);
-
-export function run(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: "inherit",
-      windowsHide: true,
-      ...options,
-    });
-    child.on("error", () =>
-      reject(
-        Error(`${command} is unavailable. Install it, then run setup again.`),
-      ),
-    );
-    child.on("exit", (code) =>
-      code === 0
-        ? resolve()
-        : reject(
-            Error(
-              `${command} failed. Fix the error above, then run setup again.`,
-            ),
-          ),
-    );
-  });
-}
 
 export async function question(label, fallback = "", { secret = false } = {}) {
   if (!process.stdin.isTTY)
@@ -113,91 +87,6 @@ async function reachable(url) {
   }
 }
 
-async function readEnvironment(file) {
-  const stat = await lstat(file).catch((e) => {
-    if (e.code === "ENOENT") return null;
-    throw e;
-  });
-  if (!stat) return { text: "", values: {}, exists: false };
-  if (
-    stat.isFile() &&
-    process.platform !== "win32" &&
-    stat.uid === process.getuid()
-  )
-    await chmod(file, 0o600);
-  const text = await privateFile(file);
-  return { text, values: parseEnv(text), exists: true };
-}
-
-export async function prepareLocal({ root, url, execute = run }) {
-  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
-    throw Error(
-      "Start the remote service first, then run setup with its HTTPS URL.",
-    );
-  if (url.protocol !== "http:" || url.hostname === "[::1]")
-    throw Error(
-      "Local Docker setup uses http://127.0.0.1:4310/mcp. Start HTTPS/IPv6 services separately, then reconnect.",
-    );
-  await execute("docker", ["info"], { stdio: "ignore" });
-  await execute("docker", ["compose", "version"], { stdio: "ignore" });
-  const file = path.join(root, "product", ".env");
-  const { text, values, exists } = await readEnvironment(file);
-  if (values.DATABASE_URL && !values.POSTGRES_PASSWORD)
-    throw Error(
-      "This installation uses local PostgreSQL. Run npm run start:local --prefix product in another terminal, then rerun setup.",
-    );
-  let content = text;
-  for (const name of ["POSTGRES_PASSWORD", "BOOTSTRAP_SECRET"]) {
-    if (
-      !values[name] ||
-      /replace_with|changeme|example|placeholder/i.test(values[name])
-    ) {
-      values[name] = randomSecret();
-      const assignment = new RegExp(`^${name}=.*$`, "m");
-      if (assignment.test(content))
-        content = content.replace(assignment, `${name}=${values[name]}`);
-      else
-        content +=
-          (content && !content.endsWith("\n") ? "\n" : "") +
-          `${name}=${values[name]}\n`;
-    }
-  }
-  if (
-    values.COORDINATION_PORT &&
-    values.COORDINATION_PORT !== (url.port || "80")
-  )
-    throw Error(
-      "The existing Docker port differs from --url. Run setup with the configured service URL.",
-    );
-  if (!values.COORDINATION_PORT)
-    content +=
-      (content && !content.endsWith("\n") ? "\n" : "") +
-      `COORDINATION_PORT=${url.port || "80"}\n`;
-  if (content !== text)
-    await writeFile(file, content, {
-      mode: 0o600,
-      ...(exists ? {} : { flag: "wx" }),
-    });
-  // A portable, existing directory avoids a platform-specific bind mount default.
-  const imports = path.join(root, ".local", "legacy-imports");
-  await mkdir(imports, { recursive: true });
-  await execute(
-    "docker",
-    [
-      "compose",
-      "--project-directory",
-      root,
-      "--env-file",
-      file,
-      "up",
-      "--build",
-      "--wait",
-    ],
-    { cwd: root, env: { ...process.env, LEGACY_IMPORT_ROOT: imports } },
-  );
-  return values.BOOTSTRAP_SECRET;
-}
-
 export async function firstRun({
   root = projectRoot,
   home = os.homedir(),
@@ -206,7 +95,7 @@ export async function firstRun({
   project,
   prompt = question,
   log = console.log,
-  execute = run,
+  startLocalService,
 } = {}) {
   const url = endpoint(
     inputUrl || (await prompt("Service URL", "http://127.0.0.1:4310/mcp")),
@@ -251,27 +140,31 @@ export async function firstRun({
   ).trim();
   if (!projectName || projectName.length > 500)
     throw Error("Use a project name between 1 and 500 characters");
+  log(`Checking coordination service at ${url.href}...`);
   let state = await reachable(url),
     bootstrap;
+  if (state && !(await serviceReady(url)))
+    throw Error(
+      "The service at this URL is not healthy. Check PostgreSQL and verify the coordination service URL before continuing.",
+    );
   if (!state) {
     if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
       throw Error(
         "Service unavailable. Check the HTTPS URL and start the remote service first.",
       );
-    if (
-      (
-        await prompt("Start the local service with Docker? y/n", "y")
-      ).toLowerCase() !== "y"
-    )
-      throw Error("Start your service, then rerun node setup.mjs");
-    log(
-      "Preparing and starting the local service. The first Docker build can take a few minutes...",
-    );
-    bootstrap = await prepareLocal({ root, url, execute });
+    const local = await prepareLocal({
+      root,
+      url,
+      directory,
+      prompt,
+      log,
+      ...(startLocalService ? { start: startLocalService } : {}),
+    });
+    bootstrap = local.bootstrap;
     state = await reachable(url);
     if (!state)
       throw Error(
-        "Service is not ready. Check docker compose logs app, then rerun setup.",
+        "Service is not ready after startup. Check the private service log and saved PostgreSQL settings.",
       );
   }
   if (state.bootstrap_required) {
@@ -288,8 +181,13 @@ export async function firstRun({
     if (!profile) profile = { username: "operator", password: randomSecret() };
   } else if (!profile) {
     profile = {
-      username: await prompt("Owner username", "operator"),
-      password: await prompt("Owner password", "", { secret: true }),
+      username: await prompt(
+        "Coordination owner username (separate from PostgreSQL)",
+        "operator",
+      ),
+      password: await prompt("Coordination owner password", "", {
+        secret: true,
+      }),
     };
   }
   // Save generated account details before bootstrap so interrupted runs can recover.
@@ -322,8 +220,12 @@ export async function firstRun({
   await writeFile(profileFile, JSON.stringify(saved, null, 2) + "\n", {
     mode: 0o600,
   });
+  if (!(await serviceReady(url)))
+    throw Error(
+      "The service stopped responding during setup. Restart setup to check PostgreSQL and start the service again.",
+    );
   log(
-    "Setup complete. Reload/enable coordination in your editor's MCP settings.",
+    "READY: PostgreSQL and MCP service verified. Client connections configured. Reload/enable coordination in your client.",
   );
   log(
     "Open a Git repository: workspace registration is automatic. Use collaboration_list to find other repositories.",

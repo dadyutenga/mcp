@@ -1,4 +1,4 @@
-# MCP Agent Coordination v1.5
+# MCP Agent Coordination v1.5.1
 
 A **headless coordination service** for agents working across two or more repositories.
 Agents connect through MCP to share work status, coordinate tasks and file leases,
@@ -13,11 +13,10 @@ a name, header or query parameter.
 ## First-time setup
 
 Follow the **[step-by-step setup instructions](SETUP.md)** to install it yourself.
-The guide includes a fresh Docker installation, reuse of local PostgreSQL,
+The guide covers PostgreSQL connection settings, automatic local startup,
 client verification, and reinstalling after removing an earlier installation.
 
-Install **Node.js 24+** and **Git**. For a new local service, also install and start
-Docker Desktop (or Docker Engine with Compose). Then:
+Install **Node.js 24+**, **Git**, and start a **PostgreSQL 16+** server. Then:
 
 ```sh
 git clone https://github.com/dadyutenga/mcp.git
@@ -27,10 +26,15 @@ node setup.mjs
 
 Setup installs Node dependencies and asks which editor to connect and what to
 call your workspace. Accept the default service URL to run locally. It generates
-the service secrets, starts Docker, creates the first operator account, and
+PostgreSQL settings, starts the Node service, creates the first operator account, and
 installs **global** MCP configuration for your selected clients. No JSON
-or `.env` editing is required. First-time Docker image downloads/builds can take
-a few minutes.
+or `.env` editing is required. Docker and the PostgreSQL command-line tools are not needed.
+
+Setup asks for PostgreSQL host (`127.0.0.1`), port (`5432`), database
+(`coordination`), username (`postgres`) and a hidden password. The default database
+URL is `postgresql://postgres@127.0.0.1:5432/coordination`; the password is entered
+separately. It verifies the login, offers to create a missing database, starts the
+service in the background and checks readiness before reporting **READY**.
 
 Select one client, several clients, or all five:
 
@@ -60,12 +64,13 @@ do not provide workspace roots can call `workspace_register` with the repo path.
 
 Private account details and enrollment tokens are saved outside Git under
 `~/.config/agent-coordination/installations/`. Setup prints the account file path,
-never its password. Keep that file private; rerunning setup reuses it. Docker
-restarts the service when Docker starts again. Agents connect while the service
+never its password. Keep that file private; rerunning setup reuses it. After a
+computer restart, rerun `node setup.mjs` to start the service with saved PostgreSQL
+settings. Agents connect while the service
 and their editor MCP connection are running; external agents receive work by
 polling MCP.
 
-Already have a service? Supply its URL; Docker is not needed on this computer:
+Already have a service? Supply its URL:
 
 ```sh
 node setup.mjs --url https://coordination.example/mcp --client cursor
@@ -78,7 +83,7 @@ its bootstrap secret. Run `node setup.mjs --help` for options.
 See [global setup](product/README.md#global-setup-with-automatic-repository-registration)
 for manual configuration, automation and additional MCP clients.
 
-Download the [v1.5.0 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.0)
+Download the [v1.5.1 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.1)
 or read the [changelog](CHANGELOG.md). Existing checkouts can update with
 `git pull --ff-only`, then rerun setup for any additional clients. Existing tokens,
 repository registrations and database records are retained. Check the installed
@@ -86,15 +91,8 @@ version with `node setup.mjs --version`.
 
 ## Manual service setup
 
-```sh
-cp product/.env.example product/.env
-# Replace the placeholders with independently generated random values.
-chmod 600 product/.env
-docker compose --env-file product/.env up --build --wait
-```
-
-For an existing local PostgreSQL service, configure `DATABASE_URL` and
-`BOOTSTRAP_SECRET` in the private `product/.env`, then:
+Setup saves the verified PostgreSQL URL and a generated bootstrap secret in the
+private, ignored `product/.env`. To start a configured service in the foreground:
 
 ```sh
 npm ci --prefix product

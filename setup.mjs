@@ -14,9 +14,10 @@ const help = `Coordination MCP v${version} setup
   node setup.mjs --url https://coordination.example/mcp
   node setup.mjs --config /absolute/private/global-setup.json
 
-Requires Node.js 24+, Git, and Docker with Compose for a new local service.
-An existing service needs no Docker on this computer.
-Setup installs dependencies, prepares the service and installs global editor config.
+Requires Node.js 24+, Git, and a running PostgreSQL 16+ server.
+Setup asks for the PostgreSQL host, port, database, username and hidden password.
+Defaults: 127.0.0.1:5432, database coordination, username postgres.
+Setup verifies PostgreSQL, starts the local service and installs global MCP config.
 `;
 if (process.argv.includes("--version")) {
   console.log(version);

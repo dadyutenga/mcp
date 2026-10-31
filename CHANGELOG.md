@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.5.1 — 2026-10-31
+
+The installer now connects directly to PostgreSQL and starts the Node service.
+
+- Remove Docker prompts, commands and prerequisites from guided setup.
+- Ask for PostgreSQL host, port, database, username and a hidden password. Defaults
+  are `127.0.0.1`, `5432`, `coordination` and `postgres`; no password is assumed.
+- Verify PostgreSQL credentials and version before saving configuration. Offer to
+  create a missing database with the supplied user's permission.
+- Encode special characters in connection credentials correctly.
+- Start a background Node service with private logs and PID information, and
+  verify actual readiness before reporting **READY**.
+- Reuse saved settings and distinguish PostgreSQL login from an existing
+  Coordination operator account. Preserve existing databases and configuration.
+- Add regression tests for the original Docker-only failure and integration tests
+  for native startup, saved settings, wrong passwords and database creation.
+
+Update an existing checkout with `git pull --ff-only`, then run
+`node setup.mjs --client all`. PostgreSQL 16+ must be installed and running.
+
 ## 1.5.0 — 2026-10-31
 
 This release adds native global setup for Codex, Claude Code and Grok Build to the
