@@ -12,6 +12,10 @@ a name, header or query parameter.
 
 ## First-time setup
 
+Follow the **[step-by-step setup instructions](SETUP.md)** to install it yourself.
+The guide includes a fresh Docker installation, reuse of local PostgreSQL,
+client verification, and reinstalling after removing an earlier installation.
+
 Install **Node.js 24+** and **Git**. For a new local service, also install and start
 Docker Desktop (or Docker Engine with Compose). Then:
 

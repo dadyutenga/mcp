@@ -8,6 +8,9 @@ local SQLite MCP mode remains in `tools/agent-coordination`.
 
 ## Guided first-time installation
 
+For a complete manual walkthrough, see the [setup instructions](../SETUP.md),
+including prerequisites and reinstalling with an existing PostgreSQL database.
+
 From a cloned checkout with Node.js 24+ and Git installed:
 
 ```sh
