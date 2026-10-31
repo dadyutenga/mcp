@@ -334,11 +334,18 @@ export class Workspaces {
       kind = resourceKind(params.name);
     if (id && kind) {
       let resource = this.resources.get(`${kind}:${id}`);
-      if (!resource) {
+      if (!resource || params.name.endsWith("_get")) {
         const found = await this.collect({
           name: `${kind}_get`,
           arguments: { id },
         });
+        if (params.name.endsWith("_get"))
+          return (
+            found.find((p) => !p.response.isError)?.response ||
+            failure(
+              "Resource was not found in any authorized registered repository.",
+            )
+          );
         resource = found.find((p) => !p.response.isError)?.value;
       }
       if (!resource)

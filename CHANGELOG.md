@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.4 — 2026-10-31
+
+- Fetch shared requests and other resources through a registered worker that is
+  actually authorized to read them. A target delegate can read a request created
+  by another editor even when both have registered its source repository.
+- Preserve the enforced read, acknowledgement, work, progress and evidence
+  workflow from 1.5.3. Add coverage for the live Cursor/Antigravity routing case.
+
 ## 1.5.3 — 2026-10-31
 
 Enforce an explicit collaboration request handling workflow.

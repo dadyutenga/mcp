@@ -80,6 +80,31 @@ test("unscoped creation and unknown repositories never broadcast a write", async
   assert.equal(calls.length, 0);
 });
 
+test("request getters use an authorized target even when an unrelated source worker is registered", async () => {
+  const request = {
+    id: "question",
+    repo_id: "driver",
+    target_repo: "backend",
+    requester: "cursor-driver-agent",
+    scope: "POST /auth/google account role",
+  };
+  const { workspaces } = fixture((repo_id) =>
+    repo_id === "backend"
+      ? ok(request)
+      : {
+          isError: true,
+          content: [{ text: "Unknown or unauthorized resource" }],
+        },
+  );
+  workspaces.remember("collaboration_inbox", { items: [request] });
+  const response = await workspaces.call({
+    name: "cross_repo_requests_get",
+    arguments: { id: request.id },
+  });
+  assert.notEqual(response.isError, true);
+  assert.equal(response.structuredContent.result.scope, request.scope);
+});
+
 test("request decisions and answers use the target; clarification and requester withdrawal use the source", async () => {
   const { workspaces, calls } = fixture((repo_id, params) =>
     ok({ id: "answer", repo_id }),

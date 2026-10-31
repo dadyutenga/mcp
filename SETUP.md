@@ -1,4 +1,4 @@
-# Install Coordination MCP v1.5.3
+# Install Coordination MCP v1.5.4
 
 Run setup yourself after installing the prerequisites below. Setup handles Node
 dependencies, service secrets, the first account and global MCP configuration.
@@ -27,12 +27,12 @@ setup connects directly through its Node driver.
 Use your existing checkout, or clone the release:
 
 ```sh
-git clone --branch v1.5.3 https://github.com/dadyutenga/mcp.git
+git clone --branch v1.5.4 https://github.com/dadyutenga/mcp.git
 cd mcp
 ```
 
-You can also download and extract `mcp-1.5.3.zip` from the
-[v1.5.3 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.3). Open a
+You can also download and extract `mcp-1.5.4.zip` from the
+[v1.5.4 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.4). Open a
 terminal in the extracted directory containing `setup.mjs`.
 
 ## 3. Run setup
@@ -164,7 +164,7 @@ grok mcp list
 
 For Claude Code, use `/mcp` to inspect the connection. Run only the commands for
 clients installed on your computer. The local service also exposes JSON metadata
-at `http://127.0.0.1:4310/`; its version should be `1.5.3`.
+at `http://127.0.0.1:4310/`; its version should be `1.5.4`.
 
 To update an existing checkout, run `git pull --ff-only`. Restart the local Node
 service to load the new server code, then reload `coordination` in each client's
