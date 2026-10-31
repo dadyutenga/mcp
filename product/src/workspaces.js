@@ -346,7 +346,14 @@ export class Workspaces {
           "Resource was not found in any authorized registered repository.",
         );
       let target = resource.repo_id;
-      if (["request_decide", "request_answer"].includes(params.name)) {
+      if (
+        [
+          "request_read",
+          "request_work",
+          "request_decide",
+          "request_answer",
+        ].includes(params.name)
+      ) {
         const source = this.sessions.get(resource.repo_id);
         target =
           params.name === "request_decide" &&

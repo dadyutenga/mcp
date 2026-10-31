@@ -5,6 +5,15 @@ import { database } from "../src/db.js";
 import { Service, permissions } from "../src/service.js";
 const url = process.env.TEST_DATABASE_URL;
 if (!url) throw Error("Disposable TEST_DATABASE_URL required");
+async function handle(s, principal, id) {
+  const q = await s.execute(principal, "request_read", { id });
+  await s.execute(principal, "request_work", {
+    id,
+    revision: q.request_revision,
+    status: "working",
+    note: "Review the exact request scope and fixture contract",
+  });
+}
 async function fixture() {
   const pool = await database(url),
     s = new Service(pool),
@@ -180,6 +189,7 @@ test("cross-repo answer notifications are delivered only to the requester, and e
       scope: "POST /login fields",
       type: "api-contract",
     });
+    await handle(s, pb, q.id);
     await s.execute(pb, "request_decide", {
       id: q.id,
       decision: "approved",
@@ -188,6 +198,7 @@ test("cross-repo answer notifications are delivered only to the requester, and e
     await s.execute(pb, "request_answer", {
       id: q.id,
       content: '{"email":"string"}',
+      evidence: "Reviewed fixture POST /login contract",
     });
     const events = await s.events(pa);
     assert.ok(
@@ -277,6 +288,7 @@ test("incoming request events reach a target-only delegate and target-scoped req
         (e) => e.resource_id === request.id && e.action === "request_clarify",
       ),
     );
+    await handle(s, backend, request.id);
     await s.execute(backend, "request_decide", {
       id: request.id,
       decision: "approved",
@@ -285,6 +297,7 @@ test("incoming request events reach a target-only delegate and target-scoped req
     await s.execute(backend, "request_answer", {
       id: request.id,
       content: "Fixture contract response",
+      evidence: "Reviewed the fixture authentication role contract",
     });
     assert.equal(
       (await s.inbox(backend)).items.length,
@@ -329,6 +342,7 @@ test("request clarification, bounded reference scope and requester withdrawal re
       requested_paths: ["src/login.ts"],
       type: "excerpt",
     });
+    await handle(s, pb, q.id);
     await s.execute(pb, "request_decide", {
       id: q.id,
       decision: "needs-input",
@@ -339,6 +353,7 @@ test("request clarification, bounded reference scope and requester withdrawal re
       clarification: "JSON request and response only",
     });
     assert.equal(q.state, "pending");
+    await handle(s, pb, q.id);
     await s.execute(pb, "request_decide", {
       id: q.id,
       decision: "approved",
@@ -348,6 +363,7 @@ test("request clarification, bounded reference scope and requester withdrawal re
       s.execute(pb, "request_answer", {
         id: q.id,
         content: "Other file",
+        evidence: "Reviewed src/private.ts fixture",
         reference: { path: "src/private.ts", commit: "a".repeat(40) },
       }),
       /outside the approved/,

@@ -1,4 +1,4 @@
-# MCP Agent Coordination v1.5.2
+# MCP Agent Coordination v1.5.3
 
 A **headless coordination service** for agents working across two or more repositories.
 Agents connect through MCP to share work status, coordinate tasks and file leases,
@@ -83,7 +83,7 @@ its bootstrap secret. Run `node setup.mjs --help` for options.
 See [global setup](product/README.md#global-setup-with-automatic-repository-registration)
 for manual configuration, automation and additional MCP clients.
 
-Download the [v1.5.2 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.2)
+Download the [v1.5.3 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.3)
 or read the [changelog](CHANGELOG.md). Existing checkouts can update with
 `git pull --ff-only`, then rerun setup for any additional clients. Existing tokens,
 repository registrations and database records are retained. Check the installed

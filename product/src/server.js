@@ -92,9 +92,10 @@ export async function app({
         "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'",
       );
   });
-  function rate(req) {
+  const knownMcpCredentials = new Set();
+  function rate(req, credential = "") {
     const route = req.routeOptions?.url || req.url.split("?", 1)[0];
-    const key = req.ip + ":" + req.method + ":" + route;
+    const key = req.ip + ":" + req.method + ":" + route + ":" + credential;
     const max = route === "/mcp" ? 300 : 20;
     const now = Date.now();
     let r = rates.get(key);
@@ -104,6 +105,25 @@ export async function app({
     }
     if (++r.count > max) throw new Fault(429, "Try again in one minute");
     if (rates.size > 10000) rates.clear();
+  }
+  async function mcpPrincipal(req) {
+    const raw = req.headers.authorization?.replace(/^Bearer /, "");
+    const fingerprint = raw ? hash(raw) : "";
+    const known = knownMcpCredentials.has(fingerprint);
+    rate(req, known ? fingerprint : "");
+    try {
+      // Always reauthenticate: a cached bucket never bypasses revocation/expiry.
+      const principal = await service.authenticate(raw, req.id);
+      if (!known) {
+        rate(req, fingerprint);
+        if (knownMcpCredentials.size >= 10000) knownMcpCredentials.clear();
+        knownMcpCredentials.add(fingerprint);
+      }
+      return principal;
+    } catch (error) {
+      knownMcpCredentials.delete(fingerprint);
+      throw error;
+    }
   }
   async function owner(req, write = false) {
     const raw = (req.headers.cookie || "")
@@ -396,33 +416,21 @@ export async function app({
     if (!reply.raw.destroyed) timer = setInterval(tick, 1500);
   });
   server.get("/mcp", async (req, reply) => {
-    rate(req);
-    await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
+    await mcpPrincipal(req);
     reply.code(405);
     return {
       error: { message: "Use authenticated POST requests for stateless MCP" },
     };
   });
   server.delete("/mcp", async (req, reply) => {
-    rate(req);
-    await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
+    await mcpPrincipal(req);
     reply.code(405);
     return {
       error: { message: "Stateless MCP has no server session to delete" },
     };
   });
   server.post("/mcp", async (req, reply) => {
-    rate(req);
-    const p = await service.authenticate(
-      req.headers.authorization?.replace(/^Bearer /, ""),
-      req.id,
-    );
+    const p = await mcpPrincipal(req);
     p.request_id = req.id;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

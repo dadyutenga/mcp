@@ -92,6 +92,8 @@ test("request decisions and answers use the target; clarification and requester 
   };
   workspaces.remember("request_create", request);
   for (const [name, decision] of [
+    ["request_read"],
+    ["request_work"],
     ["request_decide", "approved"],
     ["request_answer"],
     ["request_clarify"],
@@ -106,7 +108,7 @@ test("request decisions and answers use the target; clarification and requester 
   }
   assert.deepEqual(
     calls.map((c) => c.repo_id),
-    ["backend", "backend", "driver", "driver"],
+    ["backend", "backend", "backend", "backend", "driver", "driver"],
   );
 });
 

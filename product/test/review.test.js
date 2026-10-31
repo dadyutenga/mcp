@@ -31,6 +31,40 @@ test("query variations share route/method rate buckets and MCP keeps its intende
     bootstrapSecret: "test-bootstrap-secret-at-least-thirty-two",
   });
   try {
+    const owner = { id: randomUUID(), owner: true },
+      s = server.service;
+    const project = await s.execute(owner, "project_create", {
+      name: "Rate isolation",
+    });
+    const repo = await s.execute(owner, "repo_create", {
+      project_id: project.id,
+      name: "Agents",
+      reference: "fixture:rate-isolation",
+    });
+    const agent = await s.execute(owner, "agent_enroll", {
+      name: "Polling agent",
+      grants: [{ repo_id: repo.id, permissions: ["task:read"] }],
+    });
+    const authenticated = () =>
+      server.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          authorization: "Bearer " + agent.token,
+          accept: "application/json, text/event-stream",
+        },
+        payload: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "rate-test", version: "1" },
+          },
+        },
+      });
+    assert.equal((await authenticated()).statusCode, 200);
     for (let i = 0; i < 20; i++)
       assert.equal(
         (
@@ -52,7 +86,7 @@ test("query variations share route/method rate buckets and MCP keeps its intende
       ).statusCode,
       429,
     );
-    for (let i = 0; i < 300; i++)
+    for (let i = 0; i < 299; i++)
       assert.equal(
         (
           await server.inject({
@@ -81,6 +115,17 @@ test("query variations share route/method rate buckets and MCP keeps its intende
         })
       ).statusCode,
       401,
+    );
+    assert.equal(
+      (await authenticated()).statusCode,
+      200,
+      "A client's verified credential has its own budget despite another bucket being exhausted",
+    );
+    await s.execute(owner, "agent_revoke", { id: agent.agent.id });
+    assert.equal(
+      (await authenticated()).statusCode,
+      401,
+      "Rate bucket caching must never bypass credential revocation",
     );
   } finally {
     await server.close();

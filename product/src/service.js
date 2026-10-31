@@ -2,6 +2,15 @@ import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
 import { transaction, get, list, put, hydrate } from "./db.js";
 import { rejectSecrets } from "./secrets.js";
+import {
+  requestRevision,
+  receiptFor,
+  handling,
+  requestView,
+  ownsWork,
+  WORK_LEASE_MS,
+  BLOCKED_RECHECK_MS,
+} from "./request-workflow.js";
 export const hash = (s) => createHash("sha256").update(s).digest("hex");
 const canonical = (value) =>
   JSON.stringify(value, (_, v) =>
@@ -167,6 +176,13 @@ const schemas = {
     clarification: short,
     scope: narrowScope.optional(),
   }),
+  request_read: z.object({ id: uuid }),
+  request_work: z.object({
+    id: uuid,
+    revision: z.number().int().positive(),
+    status: z.enum(["working", "blocked"]),
+    note: short,
+  }),
   request_decide: z.object({
     id: uuid,
     decision: z.enum(["approved", "denied", "needs-input", "revoked"]),
@@ -175,6 +191,7 @@ const schemas = {
   request_answer: z.object({
     id: uuid,
     content: text,
+    evidence: short,
     reference: z
       .object({ path: short, commit: z.string().regex(/^[a-f0-9]{40}$/) })
       .optional(),
@@ -333,6 +350,8 @@ export class Service {
       agent_id,
       full = false,
       incoming = false,
+      attention_only = false,
+      include_working = false,
     } = {},
   ) {
     if (after) z.uuid().parse(after);
@@ -399,6 +418,11 @@ export class Service {
           filters.push(
             "r.body->>'state' IN ('pending','approved','needs-input') AND (r.body->>'expires_at')::timestamptz>now()",
           );
+          if (attention_only)
+            filters.push(`r.body->>'state' IN ('pending','approved') AND (
+            COALESCE((r.body->'work'->>'revision')::integer,0)<>COALESCE((r.body->>'request_revision')::integer,1)
+            OR COALESCE((r.body->'work'->>'lease_until')::timestamptz,'epoch'::timestamptz)<=now()
+            ${include_working ? `OR (r.body->'work'->>'agent_id'=${bind(p.id)}::text AND r.body->'work'->>'connection_id' IS NOT DISTINCT FROM ${bind(p.token_id || null)}::text AND r.body->'work'->>'status'='working')` : ""})`);
         }
         if (task_id) filters.push(`r.body->>'task_id'=${bind(task_id)}`);
         if (request_id)
@@ -460,7 +484,10 @@ export class Service {
         const selected = [];
         let bytes = 0;
         for (const row of rows.slice(0, n)) {
-          const x = { ...row };
+          const x =
+            kind === "cross_repo_requests"
+              ? requestView(row, p.id, p.token_id || null)
+              : { ...row };
           delete x.hash;
           delete x.records;
           if (x.legacy_record) {
@@ -797,7 +824,28 @@ export class Service {
             default_branch: repo.default_branch,
           },
           permissions: grant.permissions,
-          startup_tools: ["identity_get", "state_snapshot", "events_poll"],
+          startup_tools: [
+            "identity_get",
+            "state_snapshot",
+            "collaboration_inbox",
+            "events_poll",
+          ],
+          request_workflow: {
+            steps: [
+              "request_read",
+              "request_work",
+              "request_decide",
+              "request_answer",
+            ],
+            acknowledgement:
+              "request_work requires the revision returned by request_read and a concrete working/blocked note",
+            progress_interval_seconds: WORK_LEASE_MS / 1000,
+            blocked_recheck_seconds: BLOCKED_RECHECK_MS / 1000,
+            answer_requires:
+              "A live working claim, approved exact scope, content and evidence",
+            enforcement:
+              "Incoming requests gate ordinary MCP writes until handled; heartbeat never acknowledges a request",
+          },
           coordination_tools: [
             "tasks_list",
             "task_create",
@@ -808,6 +856,10 @@ export class Service {
             "reservation_release",
             "context_publish",
             "request_create",
+            "request_read",
+            "request_work",
+            "request_decide",
+            "request_answer",
           ],
         };
       },
@@ -854,6 +906,47 @@ export class Service {
   }
   async inbox(p, options = {}) {
     return this.read(p, "cross_repo_requests", { ...options, incoming: true });
+  }
+  async requireCollaborationAttention(c, p, action, input) {
+    if (
+      p.owner ||
+      action.startsWith("request_") ||
+      action === "reservation_release"
+    )
+      return;
+    const rows = (
+      await c.query(
+        `SELECT q.* FROM cross_repo_requests q
+      WHERE q.body->>'state' IN ('pending','approved') AND (q.body->>'expires_at')::timestamptz>now()
+      AND EXISTS(SELECT 1 FROM agent_repo_grants g WHERE g.agent_id=$1 AND g.repo_id=q.target_repo_id
+        AND g.body->'permissions' ? 'cross_repo:approve'
+        AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now()))
+      AND (COALESCE((q.body->'work'->>'revision')::integer,0)<>COALESCE((q.body->>'request_revision')::integer,1)
+        OR COALESCE((q.body->'work'->>'lease_until')::timestamptz,'epoch'::timestamptz)<=now()
+        OR ($2::boolean AND q.body->'work'->>'agent_id'=$1::text AND q.body->'work'->>'connection_id' IS NOT DISTINCT FROM $3::text AND q.body->'work'->>'status'='working'))
+      ORDER BY q.created_at LIMIT 1`,
+        [
+          p.id,
+          action === "task_update" && input.state === "done",
+          p.token_id || null,
+        ],
+      )
+    ).rows;
+    for (const row of rows) {
+      const q = hydrate(row),
+        state = handling(q, p.id);
+      if (
+        state.action_required ||
+        (action === "task_update" &&
+          input.state === "done" &&
+          q.work?.agent_id === p.id &&
+          q.work?.status === "working")
+      )
+        fail(
+          409,
+          `COLLABORATION_ACTION_REQUIRED: request ${q.id} for repository ${q.target_repo} is ${state.status}. Call request_read, then request_work with that revision and a working/blocked note. Answer with evidence or report a concrete blocker before completing work.`,
+        );
+    }
   }
   async notifications(p, after = 0, { before, latest = false } = {}) {
     if (!p.owner) fail(403, "Owner only");
@@ -927,7 +1020,7 @@ export class Service {
               (actor=$2 OR repo_id=ANY($3) OR (action IN ('workspace_registered','workspace_agent_registered')
                 AND EXISTS(SELECT 1 FROM repositories r WHERE r.id::text=a.repo_id AND r.project_id=ANY($5::uuid[])))))
               OR (recipient_agent_id::text=$2 AND repo_id=ANY($4))
-              OR (recipient_agent_id IS NULL AND action IN ('request_create','request_clarify','request_decide')
+              OR (recipient_agent_id IS NULL AND action IN ('request_create','request_clarify','request_decide','request_read','request_work')
                 AND EXISTS(SELECT 1 FROM cross_repo_requests q JOIN agent_repo_grants g ON g.repo_id=q.target_repo_id
                   WHERE q.id::text=a.resource_id AND g.agent_id=$2::uuid AND g.body->'permissions' ? 'cross_repo:approve'
                     AND (g.body->>'expires_at' IS NULL OR (g.body->>'expires_at')::timestamptz>now())
@@ -994,6 +1087,7 @@ export class Service {
         (await get(c, table, id)) || fail(404, "Unknown " + table);
       const save = (table, data) =>
         put(c, table, { id: randomUUID(), ...data });
+      await this.requireCollaborationAttention(c, p, action, x);
       let r;
       if (action === "installation_create") {
         owner();
@@ -1411,6 +1505,9 @@ export class Service {
         r = await save("cross_repo_requests", {
           ...x,
           requester: p.id,
+          request_revision: 1,
+          read_receipts: [],
+          work: null,
           state: "pending",
           history: [
             {
@@ -1422,6 +1519,83 @@ export class Service {
           ],
           expires_at: new Date(Date.now() + x.hours * 3600000).toISOString(),
         });
+      }
+      if (["request_read", "request_work"].includes(action)) {
+        const q = await need("cross_repo_requests", x.id);
+        await this.authorize(c, p, q.target_repo, "cross_repo:approve");
+        if (
+          ["answered", "revoked", "denied"].includes(q.state) ||
+          Date.parse(q.expires_at) <= Date.now()
+        )
+          fail(409, "Request closed or expired");
+        const revision = requestRevision(q),
+          now = new Date().toISOString();
+        if (action === "request_read") {
+          r = await put(c, "cross_repo_requests", {
+            ...q,
+            request_revision: revision,
+            read_receipts: [
+              ...(q.read_receipts || []).filter(
+                (receipt) =>
+                  receipt.agent_id !== p.id ||
+                  receipt.connection_id !== (p.token_id || null),
+              ),
+              {
+                agent_id: p.id,
+                connection_id: p.token_id || null,
+                revision,
+                delivered_at: now,
+              },
+            ].slice(-20),
+          });
+        } else {
+          if (
+            x.revision !== revision ||
+            !receiptFor(q, p.id, p.token_id || null)
+          )
+            fail(
+              409,
+              "Call request_read for the current request revision before request_work",
+            );
+          if (q.state === "needs-input")
+            fail(
+              409,
+              "Wait for requester clarification before resuming request_work",
+            );
+          if (
+            q.work?.revision === revision &&
+            !ownsWork(q, p) &&
+            Date.parse(q.work.lease_until) > Date.now()
+          )
+            fail(409, "This request is already being handled by another agent");
+          const work = {
+            agent_id: p.id,
+            connection_id: p.token_id || null,
+            revision,
+            status: x.status,
+            note: x.note,
+            started_at:
+              ownsWork(q, p) && q.work.revision === revision
+                ? q.work.started_at
+                : now,
+            updated_at: now,
+            lease_until: new Date(
+              Date.now() +
+                (x.status === "blocked" ? BLOCKED_RECHECK_MS : WORK_LEASE_MS),
+            ).toISOString(),
+          };
+          r = await put(c, "cross_repo_requests", { ...q, work });
+          if (await get(c, "agents", q.requester))
+            await this.audit(
+              c,
+              p,
+              "cross_repo_work_updated",
+              q.id,
+              q.repo_id,
+              { request_id: q.id, revision, status: x.status, agent_id: p.id },
+              q.requester,
+            );
+        }
       }
       if (action === "request_clarify") {
         const q = await need("cross_repo_requests", x.id);
@@ -1440,6 +1614,9 @@ export class Service {
           scope: x.scope || q.scope,
           state: "pending",
           approver: null,
+          request_revision: requestRevision(q) + 1,
+          read_receipts: [],
+          work: null,
           history: [
             ...(q.history || []),
             {
@@ -1471,6 +1648,34 @@ export class Service {
           fail(409, "Start a new request after 50 transitions");
         if (Date.parse(q.expires_at) <= Date.now())
           fail(409, "Request expired");
+        const withdrawing =
+          action === "request_decide" &&
+          x.decision === "revoked" &&
+          q.requester === p.id;
+        if (!p.owner && !withdrawing) {
+          if (!receiptFor(q, p.id, p.token_id || null))
+            fail(
+              409,
+              "Call request_read, then request_work before deciding or answering",
+            );
+          if (
+            !ownsWork(q, p) ||
+            q.work.revision !== requestRevision(q) ||
+            Date.parse(q.work.lease_until) <= Date.now()
+          )
+            fail(
+              409,
+              "Call request_work to hold a live claim; another agent may be handling this request",
+            );
+          if (
+            (action === "request_answer" || x.decision === "approved") &&
+            q.work.status !== "working"
+          )
+            fail(
+              409,
+              "Resume request_work with working status before approving or answering",
+            );
+        }
         if (action === "request_decide") {
           if (["answered", "revoked", "denied"].includes(q.state))
             fail(409, "Request closed");
@@ -1479,6 +1684,16 @@ export class Service {
             state: x.decision,
             decision_reason: x.reason,
             approver: p.id,
+            work:
+              ["denied", "revoked", "needs-input"].includes(x.decision) &&
+              q.work
+                ? {
+                    ...q.work,
+                    status:
+                      x.decision === "needs-input" ? "blocked" : x.decision,
+                    note: x.reason,
+                  }
+                : q.work,
             history: [
               ...(q.history || []),
               {
@@ -1504,6 +1719,7 @@ export class Service {
             repo_id: q.target_repo,
             request_id: q.id,
             content: x.content,
+            evidence: x.evidence,
             reference: x.reference || null,
             responder: p.id,
             scope: q.scope,
@@ -1511,6 +1727,13 @@ export class Service {
           await put(c, "cross_repo_requests", {
             ...q,
             state: "answered",
+            work: q.work
+              ? {
+                  ...q.work,
+                  status: "completed",
+                  updated_at: new Date().toISOString(),
+                }
+              : null,
             history: [
               ...(q.history || []),
               {
@@ -1557,6 +1780,8 @@ export class Service {
         });
       }
       if (!r) fail(400, "Unsupported operation");
+      if (action.startsWith("request_") && action !== "request_answer")
+        r = requestView(r, p.id, p.token_id || null);
       if (Buffer.byteLength(JSON.stringify(r)) > 24576)
         fail(
           400,

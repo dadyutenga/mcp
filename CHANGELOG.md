@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.3 — 2026-10-31
+
+Enforce an explicit collaboration request handling workflow.
+
+- Add `request_read` delivery receipts and revision-bound `request_work`
+  acknowledgements with one exclusive handler, progress and concrete blockers.
+- Gate ordinary MCP writes while incoming requests require acknowledgement or
+  renewed progress. Gate task completion while the agent has unfinished request work.
+- Require a live working claim, approved scope and evidence when answering.
+- Expire working claims after five minutes without explicit progress; recheck
+  blockers after 15 minutes. Clarification invalidates old reads and claims.
+- Expose handling status and source-side progress events without confusing
+  connection heartbeat, background delivery, acknowledgement and completion.
+- Send inbox log notifications and subscribed resource updates on five-second
+  checks, with minute reminders for unattended requests. Preserve next-call gates
+  for clients that ignore notifications; do not claim to wake unsupported editors.
+- Add a filtered attention inbox so handled pages cannot hide unread requests.
+- Isolate verified MCP credentials' rate budgets so background checks from one
+  client cannot exhaust another client's allowance. Reauthenticate every call.
+
+Update the service and reload each client's Coordination MCP bridge. Existing
+requests use the new workflow automatically; credentials and database history
+are retained. Answers now require an `evidence` field.
+
 ## 1.5.2 — 2026-10-31
 
 All registered repositories now stay active together, and incoming collaboration

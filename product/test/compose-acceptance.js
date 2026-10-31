@@ -247,6 +247,13 @@ try {
     },
   });
   assert.equal(denied.isError, true);
+  const delivered = await call(cb, "request_read", { id: q.id });
+  await call(cb, "request_work", {
+    id: q.id,
+    revision: delivered.request_revision,
+    status: "working",
+    note: "Inspect fixture login request and response contract",
+  });
   await call(cb, "request_decide", {
     id: q.id,
     decision: "approved",
@@ -256,6 +263,7 @@ try {
     id: q.id,
     content:
       '{"method":"POST","path":"/login","request":{"email":"string","password":"<redacted>"},"response":{"userId":"uuid","session":"<redacted>"}}',
+    evidence: "Verified fixture login contract request and response fields",
   });
   assert.equal((await call(ca, "cross_repo_responses_list")).items.length, 1);
   const events = await ca.callTool({

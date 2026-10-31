@@ -17,7 +17,11 @@ import { promisify } from "node:util";
 import { hash as passwordHash } from "@node-rs/argon2";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ListRootsRequestSchema,
+  ResourceUpdatedNotificationSchema,
+  LoggingMessageNotificationSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { database } from "../src/db.js";
 import { Service } from "../src/service.js";
 import { app } from "../src/server.js";
@@ -130,6 +134,15 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         });
         const inbox = await service.read(pb, "cross_repo_requests");
         assert.ok(inbox.items.some((r) => r.id === request.id));
+        const delivered = await service.execute(pb, "request_read", {
+          id: request.id,
+        });
+        await service.execute(pb, "request_work", {
+          id: request.id,
+          revision: delivered.request_revision,
+          status: "working",
+          note: "Review the login contract fixture",
+        });
         await service.execute(pb, "request_decide", {
           id: request.id,
           decision: "approved",
@@ -138,6 +151,7 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         await service.execute(pb, "request_answer", {
           id: request.id,
           content: "Login returns access_token and refresh_token field names.",
+          evidence: "Reviewed the fixture login response fields",
         });
         assert.ok(
           (await service.read(pa, "cross_repo_responses")).items.length,
@@ -244,6 +258,20 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
           { capabilities: { roots: { listChanged: true } } },
         );
         client.setRequestHandler(ListRootsRequestSchema, () => ({ roots }));
+        const resourceUpdates = [],
+          warnings = [];
+        client.setNotificationHandler(
+          ResourceUpdatedNotificationSchema,
+          (notice) => {
+            resourceUpdates.push(notice.params);
+          },
+        );
+        client.setNotificationHandler(
+          LoggingMessageNotificationSchema,
+          (notice) => {
+            warnings.push(notice.params);
+          },
+        );
         await client.connect(
           new StdioClientTransport({
             command: process.execPath,
@@ -326,6 +354,13 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
           (await call("tasks_list")).items.some((t) => t.id === task.id),
         );
         assert.equal((await call("state_snapshot")).workspaces.length, 2);
+        const inboxURI = "coordination://collaboration/inbox";
+        assert.ok(
+          (await client.listResources()).resources.some(
+            (r) => r.uri === inboxURI,
+          ),
+        );
+        await client.subscribeResource({ uri: inboxURI });
         const question = await call("request_create", {
           input: {
             repo_id: registered.b.repo_id,
@@ -337,6 +372,51 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
         });
         const inbox = await call("collaboration_inbox");
         assert.ok(inbox.items.some((q) => q.id === question.id));
+        const resource = await client.readResource({ uri: inboxURI });
+        assert.equal(
+          JSON.parse(resource.contents[0].text).items.find(
+            (q) => q.id === question.id,
+          ).handling.status,
+          "awaiting_read",
+        );
+        const bypass = await client.callTool({
+          name: "task_create",
+          arguments: {
+            input: {
+              repo_id: registered.b.repo_id,
+              title: "Bypass using source repo",
+              description: "Must acknowledge backend request across all roots",
+            },
+          },
+        });
+        assert.equal(bypass.isError, true);
+        assert.match(bypass.content[0].text, /COLLABORATION_ACTION_REQUIRED/);
+        const deadline = Date.now() + 7500;
+        while (
+          (!resourceUpdates.length ||
+            !warnings.some((w) =>
+              w.data.requests?.some((q) => q.id === question.id),
+            )) &&
+          Date.now() < deadline
+        )
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.ok(
+          resourceUpdates.some((r) => r.uri === inboxURI),
+          "Subscribed editor must receive an inbox resource update",
+        );
+        assert.ok(
+          warnings.some((w) =>
+            w.data.requests?.some((q) => q.id === question.id),
+          ),
+          "Editor receives a request attention notification without polling tools",
+        );
+        assert.equal(
+          (await call("collaboration_inbox")).items.find(
+            (q) => q.id === question.id,
+          ).handling.status,
+          "awaiting_read",
+          "Background notification delivery never acknowledges for the agent",
+        );
         const notified = await client.callTool({
           name: "workspace_status",
           arguments: {},
@@ -345,6 +425,37 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
           notified.structuredContent.pending_collaboration.requests.some(
             (q) => q.id === question.id,
           ),
+        );
+        const delivered = await call("request_read", {
+          input: { id: question.id },
+        });
+        await call("request_work", {
+          input: {
+            id: question.id,
+            revision: delivered.request_revision,
+            status: "working",
+            note: "Review actual backend account role mapping",
+          },
+        });
+        const prematureCompletion = await client.callTool({
+          name: "task_update",
+          arguments: {
+            input: {
+              id: task.id,
+              version: claimed.version + 1,
+              state: "done",
+              progress: 100,
+            },
+          },
+        });
+        assert.equal(
+          prematureCompletion.isError,
+          true,
+          "Driver task completion must wait for this connection's backend request work",
+        );
+        assert.match(
+          prematureCompletion.content[0].text,
+          /COLLABORATION_ACTION_REQUIRED/,
         );
         await call("request_decide", {
           input: {
@@ -358,8 +469,10 @@ test("global enrollment, automatic MCP roots, repository isolation and collabora
             id: question.id,
             content:
               "The requested account role is documented in the auth contract.",
+            evidence: "Reviewed the fixture authentication role contract",
           },
         });
+        await client.unsubscribeResource({ uri: inboxURI });
         assert.equal(answer.responder, first.workspaces[0].agent_id);
         assert.ok(
           (

@@ -328,6 +328,17 @@ test("real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
       ).isError,
       true,
     );
+    const delivered = await call(cb, "request_read", {
+      input: { id: request.id },
+    });
+    await call(cb, "request_work", {
+      input: {
+        id: request.id,
+        revision: delivered.request_revision,
+        status: "working",
+        note: "Inspect requested fixture endpoint",
+      },
+    });
     await call(cb, "request_decide", {
       input: {
         id: request.id,
@@ -340,6 +351,7 @@ test("real PostgreSQL / owner HTTP / two scoped MCP agents / restart / authoriza
         id: request.id,
         content:
           '{"method":"POST","path":"/login","request":{"email":"string"},"response":{"session":"redacted example"}}',
+        evidence: "Reviewed fixture POST /login route and JSON response",
       },
     });
     assert.equal((await call(ca, "cross_repo_responses_list")).items.length, 1);

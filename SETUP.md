@@ -1,4 +1,4 @@
-# Install Coordination MCP v1.5.2
+# Install Coordination MCP v1.5.3
 
 Run setup yourself after installing the prerequisites below. Setup handles Node
 dependencies, service secrets, the first account and global MCP configuration.
@@ -27,12 +27,12 @@ setup connects directly through its Node driver.
 Use your existing checkout, or clone the release:
 
 ```sh
-git clone --branch v1.5.2 https://github.com/dadyutenga/mcp.git
+git clone --branch v1.5.3 https://github.com/dadyutenga/mcp.git
 cd mcp
 ```
 
-You can also download and extract `mcp-1.5.2.zip` from the
-[v1.5.2 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.2). Open a
+You can also download and extract `mcp-1.5.3.zip` from the
+[v1.5.3 release](https://github.com/dadyutenga/mcp/releases/tag/v1.5.3). Open a
 terminal in the extracted directory containing `setup.mjs`.
 
 ## 3. Run setup
@@ -123,11 +123,36 @@ required. Reads cover all registered repositories; actions on existing tasks,
 reservations and requests route by their IDs. New tasks and requests include the
 source `repo_id` so the tool can use the correct repository identity.
 
-Ask agents to check `collaboration_inbox` at startup and before work. Pending
-incoming requests also appear as notices on ordinary tool replies, and target
-agents receive request events through `events_poll`. An **online** badge means a
-recent connection heartbeat; it does not confirm that the agent has read or
-answered a request. MCP cannot wake an idle external editor agent.
+Agents check `collaboration_inbox` at startup. Unhandled requests gate ordinary
+MCP writes across registered roots until the agent reads and acknowledges them:
+
+1. `request_read({input:{id}})` returns the full request and `request_revision`.
+2. `request_work({input:{id,revision,status:"working",note:"Inspecting the named endpoint and tests"}})`
+   acknowledges and claims the request. Use `status:"blocked"` with a concrete
+   blocker when work cannot proceed.
+3. Investigate, approve the exact scope with `request_decide`, then submit
+   `request_answer({input:{id,content,evidence}})` with supporting files, tests,
+   references or other verification. Acknowledgement alone is not completion.
+
+Working agents update `request_work` within five minutes. Stalled work becomes
+overdue and can be claimed by another authorized delegate. Blockers are rechecked
+after 15 minutes; `needs-input` waits for requester clarification. Clarification
+invalidates earlier reads, claims and approval. Ordinary MCP task completion is
+gated while that agent still has working requests awaiting a response or blocker.
+
+The bridge checks for inbox changes every five seconds and sends MCP log notices
+and resource updates to clients subscribed to `coordination://collaboration/inbox`.
+Notices also appear on ordinary tool replies. Reads and reservation cleanup remain
+available. Heartbeats, inbox reads and background notifications never acknowledge
+work for an agent. The requester can inspect read receipts, work owner, progress,
+blockers and evidence through `cross_repo_requests_get` and response tools.
+
+An **online** badge means a connection heartbeat. MCP cannot force an editor to
+wake an idle model or prove what it understood; the enforced workflow covers MCP
+actions and explicitly recorded work. Peer requests stay within the user's
+authorized scope and do not authorize arbitrary commands or secret disclosure.
+The [MCP resource specification](https://modelcontextprotocol.io/specification/2025-11-25/server/resources)
+leaves resource presentation and interaction to the client.
 
 Version and native client checks:
 
@@ -139,7 +164,7 @@ grok mcp list
 
 For Claude Code, use `/mcp` to inspect the connection. Run only the commands for
 clients installed on your computer. The local service also exposes JSON metadata
-at `http://127.0.0.1:4310/`; its version should be `1.5.2`.
+at `http://127.0.0.1:4310/`; its version should be `1.5.3`.
 
 To update an existing checkout, run `git pull --ff-only`. Restart the local Node
 service to load the new server code, then reload `coordination` in each client's
